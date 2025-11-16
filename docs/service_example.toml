@@ -1,0 +1,26 @@
+# Example kickit service
+
+# Basic description of the service, try to keep it short n sweet
+# bro think he adele
+description = "hello"
+
+#
+# A non-optional service will crash the system if it fails, an
+# optional service will provide a warning if it fails
+#
+optional = true
+
+# Whether to show service's output (stderr) on init console or not
+shout = true
+
+#
+# The service pattern (copy exactly - capitals & everything)
+#
+# 2 patterns exist so far:
+# * Standard -> Runs in the background (init watches in the background),
+# * RunOnce  -> Runs once, init waits for it to finish
+#
+pattern = "RunOnce"
+
+# The path of the executable followed by the argument(s)
+exec = ["/bin/bash", "-c", "echo 'Hello world' >&2"]
