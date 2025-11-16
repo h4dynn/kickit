@@ -44,6 +44,11 @@ pub trait KTSocket: 'static
    */
   fn handler(stream: UnixStream) -> impl Future<Output = ()> + Send;
 
+  ///
+  /// # Errors
+  ///
+  /// * Failed to shutdown the stream for whatever reason
+  ///
   fn shutdown(stream: UnixStream) -> Result<(), KTErrorTrace>
   {
     use std::net;

@@ -136,13 +136,13 @@ impl KTError
   fn exit(self) -> !
   {
     use std::process;
-    use KTError::*;
+    use KTError::{AlreadyRunning, NotInit, NotRoot};
 
     match (self)
     {
       AlreadyRunning | NotInit | NotRoot => (),
       _ => kickToEmergencyShell()
-    };
+    }
 
     process::exit(1);
   }
@@ -150,13 +150,15 @@ impl KTError
 
 impl KTErrorTrace
 {
-  pub fn new(kind: KTError, trace: impl ToString) -> Self
+  pub fn new(kind: KTError, t: &(impl ToString + ?Sized)) -> Self
   {
-    Self { kind, context: None, trace: trace.to_string() }
+    Self { kind, context: None, trace: t.to_string() }
   }
-  pub fn with_context(kind: KTError, context: impl ToString, trace: impl ToString) -> Self
+
+  pub fn with_context(kind: KTError, c: &(impl ToString + ?Sized), t: &(impl ToString + ?Sized))
+    -> Self
   {
-    Self { kind, context: Some(context.to_string()), trace: trace.to_string() }
+    Self { kind, context: Some(c.to_string()), trace: t.to_string() }
   }
 }
 
@@ -169,7 +171,7 @@ impl<S, F: Display> ConvKTError for Result<S, F>
   {
     match (self)
     {
-      Err(e) => Err(KTErrorTrace::new(errorKind, e)),
+      Err(e) => Err(KTErrorTrace::new(errorKind, &e)),
       Ok(c)  => Ok(c)
     }
   }
@@ -178,7 +180,7 @@ impl<S, F: Display> ConvKTError for Result<S, F>
   {
     match (self)
     {
-      Err(e) => Err(KTErrorTrace::with_context(errorKind, context, e)),
+      Err(e) => Err(KTErrorTrace::with_context(errorKind, &context, &e)),
       Ok(c)  => Ok(c)
     }
   }
@@ -193,7 +195,7 @@ impl<F: Display> ConvKTError for Option<F>
   {
     if let Some(einfo) = self
     {
-      Err(KTErrorTrace::new(errorKind, einfo))
+      Err(KTErrorTrace::new(errorKind, &einfo))
     }
     else {
       Ok(())
@@ -204,7 +206,7 @@ impl<F: Display> ConvKTError for Option<F>
   {
     if let Some(einfo) = self
     {
-      Err(KTErrorTrace::with_context(errorKind, context, einfo))
+      Err(KTErrorTrace::with_context(errorKind, &context, &einfo))
     }
     else {
       Ok(())
@@ -219,12 +221,12 @@ impl ConvKTError for String
 
   fn trace(self, errorKind: KTError) -> KTResult<()>
   {
-    Err(KTErrorTrace::new(errorKind, self))
+    Err(KTErrorTrace::new(errorKind, &self))
   }
   fn context_trace(self, context: impl ToString, errorKind: KTError)
     -> KTResult<Self::OkType>
   {
-    Err(KTErrorTrace::with_context(errorKind, context, self))
+    Err(KTErrorTrace::with_context(errorKind, &context, &self))
   }
 }
 
@@ -235,12 +237,12 @@ impl ConvKTError for std::io::Error
 
   fn trace(self, errorKind: KTError) -> KTResult<()>
   {
-    Err(KTErrorTrace::new(errorKind, self))
+    Err(KTErrorTrace::new(errorKind, &self))
   }
   fn context_trace(self, context: impl ToString, errorKind: KTError)
     -> KTResult<Self::OkType>
   {
-    Err(KTErrorTrace::with_context(errorKind, context, self))
+    Err(KTErrorTrace::with_context(errorKind, &context, &self))
   }
 }
 

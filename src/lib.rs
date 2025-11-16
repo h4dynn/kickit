@@ -9,7 +9,7 @@ extern crate zstd;
 extern crate thiserror;
 
 use std::{fmt, fmt::Display, num::ParseIntError};
-use crate::Release::*;
+use crate::Release::Unstable;
 
 pub mod init;
 pub mod ktctl;
@@ -77,6 +77,7 @@ impl Display for Version
   Ok(data)
 }
 
+#[must_use]
 pub fn version() -> String
 {
   use crate::Release::Stable;

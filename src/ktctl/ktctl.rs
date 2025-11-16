@@ -6,7 +6,8 @@
 extern crate chrono;
 
 use std::{fs, fs::File, path::PathBuf, ffi::OsString, fmt::Display};
-use kickit::{console::{HandleKTError, Colour}, ktctl::ktctl_console::*,
+use kickit::{console::{HandleKTError, Colour},
+              ktctl::ktctl_console::{KTCtlErrorTrace, ConvKTCtlError, KTCtlError},
               affirm, display_enum, binary, path, state::InitState, Data};
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -144,7 +145,7 @@ fn readSocket<R: SocketRequest::Byte + Display + Copy>(req: R) -> Result<Data, K
   if (out.as_slice() == [0x0f])
   {
     Err(KTCtlErrorTrace::new(KTCtlError::SocketAccessFail,
-        format!("Error returned by init after requesting {req}")))
+        &format!("Error returned by init after requesting {req}")))
   }
   else {
     Ok(out)
@@ -168,7 +169,7 @@ impl Init
             return InitState::Ok
           }
         }
-        _ => ()
+        InitState::Down => ()
       }
     }
     InitState::Down
@@ -178,14 +179,12 @@ impl Init
   #[inline]
   pub fn prettyState() -> Result<(), KTCtlErrorTrace>
   {
-    use InitState::*;
+    use InitState::{Emergency, Down, Stalled, Ok};
 
     let state = Self::state();
     let colour = match (state)
     {
-      Emergency | Down => Colour::RED,
-      Stalled => Colour::ORANGE,
-      Ok => Colour::GREEN
+      Emergency | Down => Colour::RED, Stalled => Colour::ORANGE, Ok => Colour::GREEN
     };
     let addon = if (state == Ok)
     {
@@ -195,12 +194,12 @@ impl Init
         Err(..) => Err(KTCtlErrorTrace::new(KTCtlError::FormatFail, "Invalid init pid!"))
       }?);
 
-      if (initPid != 1)
+      if (initPid == 1)
       {
-        format!(" (pid: {initPid})")
+        String::new()
       }
       else {
-        String::new()
+        format!(" (pid: {initPid})")
       }
     }
     else {
@@ -247,10 +246,12 @@ impl Service
 
   #[inline] pub fn path(&self, pathName: &str) -> Result<String, KTCtlErrorTrace>
   {
-    match (pathName)
+    if (pathName == "stat")
     {
-      "stat" => Ok(format!("/proc/{}/stat", self.pid()?.expect("path(stat): pid is missing"))),
-      _ => panic!()
+      Ok(format!("/proc/{}/stat", self.pid()?.expect("path(stat): pid is missing")))
+    }
+    else {
+      panic!()
     }
   }
 
@@ -265,7 +266,7 @@ impl Service
       {
         if let Ok(stat) = fs::read_to_string(self.path("stat")?)
         {
-          match (stat.split(" ").nth(2))
+          match (stat.split(' ').nth(2))
           {
             Some("Z" | "X") => format!("{}Dead", Colour::RED),
             Some("S" | "I" | "D" | "R") => format!("{}Up", Colour::GREEN),
@@ -301,7 +302,7 @@ impl Service
 
 impl Operation
 {
-  fn services(targets: Vec<String>) -> Result<(), KTCtlErrorTrace>
+  fn services(targets: &[String]) -> Result<(), KTCtlErrorTrace>
   {
     for serviceEntry in (fs::read_dir(PathBuf::from("/run/kickit/service"))
                           .trace(KTCtlError::RunFsParseFail)?)
@@ -319,14 +320,14 @@ impl Operation
     Ok(())
   }
 
-  fn readLog(serviceName: String, ugly: bool, ignoreInit: bool) -> Result<(), KTCtlErrorTrace>
+  fn readLog(serviceName: &str, ugly: bool, ignoreInit: bool) -> Result<(), KTCtlErrorTrace>
   {
     use chrono::{Local, DateTime};
     use std::{io, io::{BufReader, BufWriter, Write, ErrorKind}};
     use zstd::stream::decode_all as zstdDecompressFile;
 
     let serviceLog = File::open(path!("/run/kickit/service", &serviceName, "log"))
-                      .context_trace(&serviceName, KTCtlError::BadService)?;
+                      .context_trace(serviceName, KTCtlError::BadService)?;
 
     // Read (potentially binary) log contents
     let logBin = zstdDecompressFile(BufReader::new(serviceLog)).trace(KTCtlError::AccessRunFsFail)?;
@@ -352,15 +353,19 @@ impl Operation
           {
             let marker = if (fromInit)
             {
-              [ if (!ugly) { format!("{}", Colour::BOLD) } else { String::new() },
+              [ if (ugly) { String::new() } else { format!("{}", Colour::BOLD) },
                 format!("(kickit){} ", Colour::RESET) ].concat()
             }
             else {
               String::new()
             };
 
-            let lineFmt = if (!ugly)
+            let lineFmt = if (ugly)
             {
+              // Don't make the timestamp human-readable, just millis
+              format!("[{timestamp}] {marker}{logContents}\n")
+            }
+            else {
               // Convert the millis type from a String to i64 so it is accepted by chrono
               let timestampUgly: i64 = timestamp.parse().trace(KTCtlError::FormatFail)?;
 
@@ -369,15 +374,11 @@ impl Operation
                * then convert from UTC timezone to the system's timzone (Local)
                */
               let logTime: DateTime<Local> = DateTime::from_timestamp_millis(timestampUgly)
-                                            .context_trace(&serviceName, KTCtlError::LogAccessFail)?
+                                            .context_trace(serviceName, KTCtlError::LogAccessFail)?
                                             .into();
 
               // Format time as <Day Month Year, Hours:Minutes:Seconds>
               format!("[{}] {marker}{logContents}\n", logTime.format("%d %b %Y, %H:%M:%S"))
-            }
-            else {
-              // Don't make the timestamp human-readable, just millis
-              format!("[{timestamp}] {marker}{logContents}\n")
             };
 
             /*
@@ -413,7 +414,7 @@ impl Operation
         {
           // Must be the 14th byte or else something is wrong
           affirm!(timestamp.len() == 13 && logContents.is_empty(),
-              KTCtlErrorTrace::with_context(KTCtlError::FormatFail, serviceName,
+              KTCtlErrorTrace::with_context(KTCtlError::FormatFail, &serviceName,
                                             "Unexpected byte 0x8F"));
 
           fromInit = true;
@@ -455,10 +456,10 @@ impl Operation
     todo!();
   }
 
-  #[inline] fn usage(operation: Option<String>) -> Result<(), KTCtlErrorTrace>
+  #[inline] fn usage(operation: Option<&String>) -> Result<(), KTCtlErrorTrace>
   {
     // Check if user provided an operation to look at or not
-    println!("{}", if let Some(ref name) = operation
+    println!("{}", if let Some(name) = operation
     {
       if (Usage::valid(name as &str)) { name.as_str().into() }
       else {
@@ -500,7 +501,7 @@ impl Operation
                        Operation::Shutdown(..) | Operation::Reboot(..)))
     {
       affirm!(Init::is_running(),
-        KTCtlErrorTrace::new(KTCtlError::InitNotRunning, String::from("Init process not found")));
+        KTCtlErrorTrace::new(KTCtlError::InitNotRunning, "Init process not found"));
     }
 
     Ok(())
@@ -509,19 +510,19 @@ impl Operation
   #[inline]
   pub fn run(self) -> Result<(), KTCtlErrorTrace>
   {
-    use Operation::*;
+    use Operation::{Help, Version, TargetInfo, ServiceList, State, Log, Shutdown, Reboot};
     match (self)
     {
-      Help(o) => Ok(Self::usage(o)?), Version => { Self::version(); Ok(()) },
-      TargetInfo => Ok(Self::getTarget()?), ServiceList(service) => Ok(Self::services(service)?),
+      Help(o) => Ok(Self::usage(o.as_ref())?), Version => { Self::version(); Ok(()) },
+      TargetInfo => Ok(Self::getTarget()?), ServiceList(service) => Ok(Self::services(&service)?),
       State => { Init::prettyState()?; Ok(()) },
-      Log(service, ugly, ignoreInit) => Ok(Self::readLog(service, ugly, ignoreInit)?),
+      Log(service, ugly, ignoreInit) => Ok(Self::readLog(&service as &str, ugly, ignoreInit)?),
       Shutdown(force) => Self::shutdown(force), Reboot(force) => Self::reboot(force)
     }
   }
 }
 
-fn cliArguments(arguments: Vec<String>) -> Result<Operation, KTCtlErrorTrace>
+fn cliArguments(arguments: &[String]) -> Result<Operation, KTCtlErrorTrace>
 {
   if (arguments.len() == 1) { return Ok(Operation::default()) }
 
@@ -576,7 +577,7 @@ fn main()
 {
   use std::env;
 
-  let operation = cliArguments(env::args().collect()).handle();
+  let operation = cliArguments(env::args().collect::<Vec<_>>().as_slice()).handle();
 
   // Check that the operation can be safely ran before continuing
   operation.sanity().handle();

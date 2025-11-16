@@ -19,7 +19,7 @@ impl From<u8> for InitState
 {
   fn from(byte: u8) -> Self
   {
-    use InitState::*;
+    use InitState::{Ok, Emergency, Stalled, Down};
 
     const OK: u8 = InitState::Ok as u8;
     const EMERGENCY: u8 = InitState::Emergency as u8;

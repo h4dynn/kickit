@@ -7,7 +7,7 @@ use std::{fs, fs::File, io::Write, path::PathBuf, process};
 use nix::unistd::getuid as uid;
 use kickit::{status, console::Colour, stall,
              console::{ReturnError, HandleKTError},
-             init::init_console::*, init::service::Service, New};
+             init::init_console::{KTError, KTErrorTrace, ConvKTError}, init::service::Service, New};
 
 ///
 /// # Errors:
@@ -25,12 +25,12 @@ use kickit::{status, console::Colour, stall,
 
   if (!sideInit)
   {
-    if (!cfg!(feature = "bypass_init_check"))
+    if (cfg!(feature = "bypass_init_check"))
     {
-      affirm!(process::id() == 1, KTError::NotInit)
+      warn!("Bypassing init checks!");
     }
     else {
-      warn!("Bypassing init checks!")
+      affirm!(process::id() == 1, KTError::NotInit);
     }
   }
 
@@ -96,7 +96,7 @@ use kickit::{status, console::Colour, stall,
     let mut logFile = File::create(&log).trace(KTError::RunFsFail)?;
 
     // Set permissions so that only root can access the logfile
-    logFile.set_permissions(Permissions::from_mode(0o100600)).trace(KTError::RunFsFail)?;
+    logFile.set_permissions(Permissions::from_mode(0o100_600)).trace(KTError::RunFsFail)?;
     // Setup empty ZSTD file (just the header)
     logFile.write_all(EMPTY_ZSTD.as_slice()).trace(KTError::RunFsFail)?;
   }
@@ -106,14 +106,15 @@ use kickit::{status, console::Colour, stall,
 
 #[inline] fn mountSysFilesystems() -> Result<(), KTErrorTrace>
 {
-  use kickit::{mountflags, mountopts, init::mount::{MountFlag::*, mount, unmount, mounted}};
+  use kickit::{mountflags, mountopts,
+                init::mount::{MountFlag::{NoSuid, NoDev, NoExec}, mount, unmount, mounted}};
 
   macro_rules! mounter
   {
     ($from: tt, $to: tt, $fsType: tt, $flags: expr, $opts: expr) =>
     {
       // Check if each destination is already mounted, and if so unmount it
-      if !(mounted($to)? && unmount($to).is_err()) { mount($from, $to, $fsType, $flags, $opts)? }
+      if !(mounted($to)? && unmount($to).is_err()) { mount($from, $to, $fsType, $flags, &$opts)? }
     }
   }
 
@@ -139,9 +140,9 @@ use kickit::{status, console::Colour, stall,
   Ok(initServices)
 }
 
-#[inline] async fn startServices(services: Vec<Service>) -> Result<(), KTErrorTrace>
+#[inline] fn startServices(services: Vec<Service>) -> Result<(), KTErrorTrace>
 {
-  use kickit::{init::service::Pattern::*, state, state::InitState};
+  use kickit::{init::service::Pattern::Standard, state, state::InitState};
 
   for mut upService in (services)
   {
@@ -153,7 +154,7 @@ use kickit::{status, console::Colour, stall,
     if let Err(trace) = upService.up()
     {
       // If this service is optional we only need to warn not abort
-      if (upService.optional) { trace.warn(); } else { trace.fatal(); }
+      if (upService.optional) { trace.warn(); } else { return Err(trace) }
     }
     else if (upService.pattern == Standard)
     {
@@ -178,14 +179,14 @@ use kickit::{status, console::Colour, stall,
 
   status!("kickit {}", kickit::version());
 
-  let targetName = if (!cfg!(debug_assertions))
+  let targetName = if (cfg!(debug_assertions))
   {
-    // If 'init.target=X' exists in cmdline, use X as our target, if not use system (the default)
-    if let Ok(Some(c)) = (cmdlineParam("init.target")) { &c.clone() as &str } else { "system" }
-  }
-  else {
     // Assume 'test' target on debug builds
     "test"
+  }
+  else {
+    // If 'init.target=X' exists in cmdline, use X as our target, if not use system (the default)
+    if let Ok(Some(c)) = (cmdlineParam("init.target")) { &c.clone() as &str } else { "system" }
   };
 
   status!("Target: {targetName}");
@@ -222,7 +223,7 @@ use kickit::{status, console::Colour, stall,
   }
 
   // Startup our services & wait for it to finish
-  startServices(ktServices).await.handle();
+  startServices(ktServices).handle();
 
   thread::sleep(Duration::new(u64::MAX, 0));
 }

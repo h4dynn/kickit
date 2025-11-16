@@ -1,4 +1,4 @@
-//! Mount implementation layered over the sys_mount crate
+//! Mount implementation layered over the `nix` crate
 
 use crate::display_enum;
 use std::fmt;
@@ -104,9 +104,9 @@ macro_rules! mountopts
 // Frontend for nix library's mount function
 ///
 /// # Errors
-/// * Couldn't mount the device (nix::mount::mount() gives more info)
+/// * Couldn't mount the device (`nix::mount::mount()` gives more info)
 ///
-pub fn mount(from: &str, to: &str, fsType: &str, flags: MountFlags, opts: MountOptions)
+pub fn mount(from: &str, to: &str, fsType: &str, flags: MountFlags, opts: &MountOptions)
   -> Result<(), crate::init::init_console::KTErrorTrace>
 {
   use crate::init::init_console::{KTError, ConvKTError};
@@ -141,9 +141,9 @@ pub fn mounted<P: AsRef<std::path::Path> + std::fmt::Display>(mountpoint: P)
   use crate::init::init_console::{KTError, ConvKTError};
 
   // Cycle through potential matches from /proc/mounts
-  for candMount in (fs::read_to_string("/proc/mounts").trace(KTError::FileNotFound)?.split("\n"))
+  for candMount in (fs::read_to_string("/proc/mounts").trace(KTError::FileNotFound)?.split('\n'))
   {
-    if (candMount.split(" ").nth(1) == Some(&mountpoint.to_string()))
+    if (candMount.split(' ').nth(1) == Some(&mountpoint.to_string()))
     {
       return Ok(true)
     }

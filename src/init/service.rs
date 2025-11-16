@@ -91,19 +91,21 @@ impl Service
     let path = file_path!(path!(crate::PREFIX, "service"), name, "toml");
 
     // Check the service config exists and is a file
-    affirm!(path.metadata().is_ok() && path.metadata().unwrap().is_file(),
-      KTErrorTrace::new(KTError::FileNotFound, format!("{name}: Service not found")));
+    if let Ok(meta) = path.metadata() && meta.is_file() { }
+    else {
+      return Err(KTErrorTrace::new(KTError::FileNotFound, &format!("{name}: Service not found")))
+    }
 
     // Read TOML configuration contents
     let toml = fs::read_to_string(path).context_trace(name, KTError::ServiceParseFail)?;
 
     // Source the configuration
     let config: Config = toml::from_str(&toml)
-                                            .context_trace(name, KTError::ServiceParseFail)?;
+                            .context_trace(name, KTError::ServiceParseFail)?;
 
     // Check the service's executable actually exists on filesystem
     affirm!(fs::metadata(&config.exec[0]).is_ok(),
-      KTErrorTrace::new(KTError::FileNotFound, format!("Executable is missing for {name}")));
+      KTErrorTrace::new(KTError::FileNotFound, &format!("Executable is missing for {name}")));
 
     // Optional values: fallback to default if not provided (optional & shout are false)
     set!(config, description, optional, shout, pattern);
@@ -137,7 +139,7 @@ impl Service
     {
       Pattern::Standard => self.process = Some(self.spawnService()?),
       Pattern::RunOnce => self.runService()?
-    };
+    }
 
     // yippie!
     self.up = true;
@@ -149,6 +151,9 @@ impl Service
   /// # Errors
   /// * Service isn't running already
   /// * Couldn't kill the service's process
+  ///
+  /// # Panics
+  /// * Service doesn't have a matching process (should have since its up)
   ///
   #[inline] pub fn down(&mut self) -> Result<(), KTErrorTrace>
   {
@@ -221,7 +226,7 @@ impl Service
     {
       if (self.shout)
       {
-        new.split("\n").for_each(|line| eprintln!("{} {}: {line}", SERVICE, self.name));
+        new.split('\n').for_each(|line| eprintln!("{} {}: {line}", SERVICE, self.name));
       }
       else {
         self.log.last = Some(new);
@@ -283,7 +288,7 @@ impl Service
         }
 
         // Sometimes our log has multiple lines so account for this here
-        for logLine in (stderrContents.split("\n"))
+        for logLine in (stderrContents.split('\n'))
         {
           self.appendLog(logLine.to_owned(), false)?;
         }
@@ -291,19 +296,11 @@ impl Service
 
       if (state!() == InitState::Ok)
       {
-        // Read the 'stat' file which contains the state of the service
-        let spec = if let Ok(c) = fs::read_to_string(self.path(Path::Pid)?)
-        {
-          c
-        }
-        else {
-          self.died()?;
-          // Continue onto next loop if warned instead of aborted
-          continue
-        };
+        // Continue onto next loop if warned instead of aborted
+        let Ok(spec) = fs::read_to_string(self.path(Path::Pid)?) else { self.died()?; continue; };
 
         // The third value in the file shows the current state (e.g. Z for zombie)
-        if (matches!(spec.split(" ").nth(2), Some("Z" | "X"))) { self.died()? }
+        if (matches!(spec.split(' ').nth(2), Some("Z" | "X"))) { self.died()? }
       }
     }
   }
@@ -311,7 +308,7 @@ impl Service
   ///
   /// # Errors
   /// * Service was killed/zombified and isn't optional
-  /// * Service couldn't be killed gracefully (.down() method)
+  /// * Service couldn't be killed gracefully (`.down()` method)
   ///
   #[inline] fn died(&mut self) -> Result<(), KTErrorTrace>
   {
@@ -349,7 +346,7 @@ impl Service
   ///
   /// # Errors
   /// * Service isn't running
-  /// * Service has a RunOnce pattern
+  /// * Service has a `RunOnce` pattern
   /// * Service's process couldn't be found
   ///
   fn pid(&self) -> Result<u32, KTErrorTrace>
@@ -415,7 +412,7 @@ impl Service
 
     let logContents = String::from_utf8(process.stderr).trace(KTError::FormatFail)?;
 
-    for line in (logContents.trim_end_matches('\n').split("\n"))
+    for line in (logContents.trim_end_matches('\n').split('\n'))
     {
       self.appendLog(line.to_owned(), false)?;
     }
@@ -452,7 +449,7 @@ impl FindPath for Service
 {
   fn path(&self, which: Path) -> Result<PathBuf, KTErrorTrace>
   {
-    use Path::*;
+    use Path::{Exited, Pid};
     Ok(PathBuf::from(match (which)
     {
       Exited => format!("/run/kickit/service/{}/exited", self.name),

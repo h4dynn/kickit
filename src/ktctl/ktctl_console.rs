@@ -46,7 +46,7 @@ pub trait ConvKTCtlError: Sized
   ///
   fn context_trace(self, context: impl Display, errorKind: KTCtlError) -> KTCtlResult<Self::OK>
   {
-    Err(KTCtlErrorTrace::with_context(errorKind, context, ""))
+    Err(KTCtlErrorTrace::with_context(errorKind, &context, ""))
   }
 }
 
@@ -98,14 +98,15 @@ impl ReturnError for KTCtlErrorTrace
 
 impl KTCtlErrorTrace
 {
-  pub fn new(kind: KTCtlError, trace: impl ToString) -> Self
+  pub fn new(kind: KTCtlError, t: &(impl ToString + ?Sized)) -> Self
   {
-    Self { kind, context: None, trace: trace.to_string() }
+    Self { kind, context: None, trace: t.to_string() }
   }
 
-  pub fn with_context(kind: KTCtlError, context: impl ToString, trace: impl ToString) -> Self
+  pub fn with_context(kind: KTCtlError, c: &(impl ToString + ?Sized), t: &(impl ToString + ?Sized))
+    -> Self
   {
-    Self { kind, context: Some(context.to_string()), trace: trace.to_string() }
+    Self { kind, context: Some(c.to_string()), trace: t.to_string() }
   }
 }
 
@@ -117,7 +118,7 @@ impl<S, F: std::fmt::Display> ConvKTCtlError for Result<S, F>
   {
     match (self)
     {
-      Err(e) => Err(KTCtlErrorTrace::new(errorKind, e)),
+      Err(e) => Err(KTCtlErrorTrace::new(errorKind, &e)),
       Ok(c)  => Ok(c)
     }
   }
@@ -127,7 +128,7 @@ impl<S, F: std::fmt::Display> ConvKTCtlError for Result<S, F>
   {
     match (self)
     {
-      Err(e) => Err(KTCtlErrorTrace::with_context(errorKind, context, e)),
+      Err(e) => Err(KTCtlErrorTrace::with_context(errorKind, &context, &e)),
       Ok(c)  => Ok(c)
     }
   }
@@ -147,7 +148,7 @@ impl<S: std::fmt::Display> ConvKTCtlError for Option<S>
     -> KTCtlResult<Self::OK>
   {
     if let Some(contents) = self { return Ok(contents) }
-    Err(KTCtlErrorTrace::with_context(errorKind, context, ""))
+    Err(KTCtlErrorTrace::with_context(errorKind, &context, ""))
   }
 }
 
@@ -157,6 +158,6 @@ impl ConvKTCtlError for String
   // Will always return an error since there is no way to check if a string is an error or not
   fn trace(self, errorKind: KTCtlError) -> KTCtlResult<()>
   {
-    Err(KTCtlErrorTrace::new(errorKind, self))
+    Err(KTCtlErrorTrace::new(errorKind, &self))
   }
 }

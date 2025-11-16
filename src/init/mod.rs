@@ -17,7 +17,7 @@ pub enum PowerLevel { On = 0, Off = 1, Reboot = 2 }
 
 pub static POWER_LEVEL: Mutex<u8> = Mutex::new(0);
 // The default shell will be bash unless the "posix_sh" feature is set
-pub(crate) const SHELL: &str = if (!cfg!(feature = "posix_sh")) { "/bin/bash" } else { "/bin/sh" };
+pub(crate) const SHELL: &str = if (cfg!(feature = "posix_sh")) { "/bin/sh" } else { "/bin/bash" };
 
 ///
 /// # Errors
@@ -36,10 +36,10 @@ pub(crate) const SHELL: &str = if (!cfg!(feature = "posix_sh")) { "/bin/bash" } 
                     .context_trace("/proc/cmdline", KTError::FileNotFound)?;
 
   // Split the cmdline's parameters by spaces
-  for _cmdlineParam in (kcmdline.split(" "))
+  for rawCmdlineParam in (kcmdline.split(' '))
   {
     // Split by equals so that if the param has a value we can return it
-    let mut cmdlineParam: Vec<&str> = _cmdlineParam.trim_end_matches('\n').split("=").collect();
+    let mut cmdlineParam: Vec<&str> = rawCmdlineParam.trim_end_matches('\n').split('=').collect();
 
     if (cmdlineParam[0] == param)
     {
