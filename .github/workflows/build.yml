@@ -1,0 +1,33 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: 'Build release variant instead of debug'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get rust toolkit
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | bash -s -- -y
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: 'main'
+
+      - name: Build (debug)
+        if: !release
+        run: cargo build
+
+      - name: Build (release)
+        if: release
+        run: cargo build --release

@@ -535,7 +535,7 @@ fn cliArguments(arguments: &[String]) -> Result<Operation, KTCtlErrorTrace>
     "target" => Ok(Operation::TargetInfo),
     "state" => Ok(Operation::State),
     "help" => Ok(if (arguments.len() == 2) { Operation::Help(None) }
-                  else { Operation::Help(Some(arguments[2].to_string())) }
+                  else { Operation::Help(Some(arguments[2].clone())) }
               ),
     "service" => Ok(if (arguments.len() == 2) { Operation::ServiceList(Vec::new()) }
                     else { Operation::ServiceList(arguments[2..].into()) }
