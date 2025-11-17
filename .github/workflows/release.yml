@@ -8,5 +8,4 @@ jobs:
     name: Build release
     uses: ./.github/workflows/build.yml
     with:
-      inputs:
-        release: true
+      release: true
