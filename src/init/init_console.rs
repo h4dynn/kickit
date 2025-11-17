@@ -89,7 +89,7 @@ macro_rules! innerFatal
   {
     log!(format!("{}{} {}{}{}", $crate::init::init_console::FATAL, Colour::BOLD,
                   $error.kind, Colour::RESET,
-                  if let Some(ref a) = $error.context { &format!(": {a}") } else { "" }));
+                  if let Some(ref a) = $error.context { format!(": {a}") } else { String::new() }));
 
     if (!$error.trace.is_empty())
     {

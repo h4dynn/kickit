@@ -51,12 +51,14 @@ mod SocketRequest
     Target = socket::Core::TARGET as isize,
     Pid = socket::Core::PID as isize
   }
+  /*
   #[derive(PartialEq, Eq, Copy, Clone, Debug)]
   pub(super) enum Power
   {
     Shutdown = socket::Power::SHUTDOWN as isize,
     Reboot = socket::Power::REBOOT as isize
   }
+  */
 
   /*
    * This is just boilerplate implementation, so we use a macro to
@@ -70,7 +72,7 @@ mod SocketRequest
     }
   }
 
-  impl_Byte! { for Core, Power }
+  impl_Byte! { for Core }
 }
 
 display_enum! { SocketRequest::Core }
