@@ -1,0 +1,8 @@
+name: Build debug
+
+on: [push, workflow_dispatch]
+
+jobs:
+  release:
+    name: Build debug
+    uses: ./.github/workflows/build.yml
