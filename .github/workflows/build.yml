@@ -25,7 +25,7 @@ jobs:
           ref: 'main'
 
       - name: Build (debug)
-        if: !release
+        if: release == false
         run: cargo build
 
       - name: Build (release)
