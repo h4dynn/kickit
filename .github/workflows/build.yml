@@ -25,9 +25,9 @@ jobs:
           ref: 'main'
 
       - name: Build (debug)
-        if: release == false
+        if: ${{ inputs.release }} == false
         run: cargo build
 
       - name: Build (release)
-        if: release
+        if: ${{ inputs.release }}
         run: cargo build --release
