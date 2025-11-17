@@ -25,9 +25,26 @@ jobs:
           ref: 'main'
 
       - name: Build (debug)
-        if: ${{ inputs.release }} == false
+        if: ${{ inputs.release == false }}
         run: cargo build
 
       - name: Build (release)
         if: ${{ inputs.release }}
         run: cargo build --release
+
+      - name: Fetch artifacts
+        uses: actions/download-artifact@v6
+
+      - name: Upload artifacts (debug)
+        if: ${{ inputs.release == false }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: debug
+          path: target/debug/*
+
+      - name: Upload artifacts (release)
+        if: ${{ inputs.release }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: release
+          path: target/release/*
