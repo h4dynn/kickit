@@ -4,7 +4,7 @@ on: [push, workflow_dispatch]
 
 jobs:
   release:
-    if: endsWith(github.event.head_commit.message, '(release)') || ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ endsWith(github.event.head_commit.message, '(release)') || github.event_name == 'workflow_dispatch' }}
     name: Build release
     uses: ./.github/workflows/build.yml
     with:
