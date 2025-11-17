@@ -166,6 +166,11 @@ use kickit::{status, console::Colour, stall,
   Ok(())
 }
 
+#[macro_export] macro_rules! sockOpen
+{
+  ($($sock: path),*) => { $(tokio::task::spawn(async move { $sock.open().await.handle(); });)* };
+}
+
 #[tokio::main] async fn main()
 {
   use kickit::{init::{target, target::TARGET_NAME, cmdlineParam}, socket, socket::KTSocket};
@@ -207,8 +212,8 @@ use kickit::{status, console::Colour, stall,
   status!("Setting up work directory");
   setupRunFs(&target.services, target.debugDump).handle();
 
-  // Open the socket for input/output system with ktctl
-  tokio::task::spawn(async move { socket::Core.open().await.handle() });
+  // Open our sockets
+  sockOpen!(socket::Core, socket::Log);
 
   // If we are running alongside another init these things should've already been done
   if (!noInit)

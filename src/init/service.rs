@@ -181,7 +181,7 @@ impl Service
   fn appendLog(&mut self, new: String, fromInit: bool) -> Result<(), KTErrorTrace>
   {
     use std::{io::{Write, BufReader}, fs::File, time::{SystemTime, UNIX_EPOCH}};
-    use crate::{state, init::init_console::SERVICE, state::InitState};
+    use crate::{state, log, init::init_console::SERVICE, state::InitState};
     use zstd::stream::decode_all as zstdDecompressFile;
     use zstd::bulk::compress as zstdCompress;
 
@@ -226,7 +226,7 @@ impl Service
     {
       if (self.shout)
       {
-        new.split('\n').for_each(|line| eprintln!("{} {}: {line}", SERVICE, self.name));
+        new.split('\n').for_each(|line| log!(format!("{} {}: {line}", SERVICE, self.name)));
       }
       else {
         self.log.last = Some(new);

@@ -1,8 +1,8 @@
 //! Error handling, warning & status implementations for the init process
 
-use std::fmt::Display;
+use std::{sync::Mutex, fmt::Display};
 use thiserror::Error;
-use crate::{console::Colour, warn, console::ReturnError, state::InitState};
+use crate::{console::Colour, log, warn, console::ReturnError, state::InitState};
 
 // The marker for each of these display types
 pub const STATUS: &str = "\x1b[1m[*]\x1b[0m";
@@ -47,9 +47,6 @@ pub enum KTError
 #[must_use]
 pub struct KTErrorTrace { kind: KTError, context: Option<String>, trace: String }
 
-// Just a Result where the error type is of KTErrorTrace
-type KTResult<S> = Result<S, KTErrorTrace>;
-
 pub trait ConvKTError
 {
   type ErrType: Display;
@@ -69,6 +66,11 @@ pub trait ConvKTError
     -> KTResult<Self::OkType>;
 }
 
+// Just a Result where the error type is of KTErrorTrace
+type KTResult<S> = Result<S, KTErrorTrace>;
+
+pub static MASTER_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 // A traceless, unknown error is the default
 impl Default for KTErrorTrace { fn default() -> Self { KTErrorTrace::new(KTError::default(), "") } }
 
@@ -77,21 +79,22 @@ macro_rules! innerFatal
   // Implementation for a tracless error, just displays the provided message
   ($error: tt) =>
   {
-    eprintln!("{}{} {}{}", $crate::init::init_console::FATAL, Colour::BOLD, $error, Colour::RESET);
+    log!(format!("{}{} {}{}", $crate::init::init_console::FATAL, Colour::BOLD,
+                  $error, Colour::RESET));
 
     $error.exit();
   };
 
   (trace, $error: tt) =>
   {
-    eprintln!("{}{} {}{}{}", $crate::init::init_console::FATAL, Colour::BOLD,
-                              $error.kind, Colour::RESET,
-                              if let Some(a) = $error.context { &format!(": {a}") } else { "" });
+    log!(format!("{}{} {}{}{}", $crate::init::init_console::FATAL, Colour::BOLD,
+                  $error.kind, Colour::RESET,
+                  if let Some(ref a) = $error.context { &format!(": {a}") } else { "" }));
 
     if (!$error.trace.is_empty())
     {
-      eprintln!("{}{} >> {}", $crate::init::init_console::FATAL, Colour::RESET,
-                              $error.trace.trim_end_matches('\n'));
+      log!(format!("{}{} >> {}", $crate::init::init_console::FATAL, Colour::RESET,
+                    $error.trace.trim_end_matches('\n')));
     }
 
     $error.kind.exit();
@@ -273,6 +276,17 @@ fn kickToEmergencyShell()
   }
 }
 
+#[macro_export] macro_rules! log
+{
+  ($new: expr) =>
+  {
+    {
+      eprintln!("{}", $new);
+      $crate::init::init_console::MASTER_LOG.lock().unwrap().push($new);
+    }
+  };
+}
+
 #[macro_export] macro_rules! stall
 {
   () =>
@@ -296,7 +310,9 @@ fn kickToEmergencyShell()
 {
   ($($message: tt)*) =>
   {
-    eprintln!("{} {}", $crate::init::init_console::STATUS, format!($($message)*))
+    {
+      $crate::log!(format!("{} {}", $crate::init::init_console::STATUS, format!($($message)*)))
+    }
   };
 }
 
@@ -304,7 +320,9 @@ fn kickToEmergencyShell()
 {
   ($($message: tt)*) =>
   {
-    eprintln!("{} {}{}{}", $crate::init::init_console::WARN, Colour::BOLD,
-              format!($($message)*), Colour::RESET);
+    {
+      $crate::log!(format!("{} {}{}{}", $crate::init::init_console::WARN, Colour::BOLD,
+                            format!($($message)*), Colour::RESET))
+    }
   };
 }

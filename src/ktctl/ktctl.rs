@@ -107,7 +107,7 @@ display_enum!
     Reboot => format!("Usage: {}{} reboot{} [--force]", binary!(), Colour::BOLD, Colour::RESET),
 
     // her name is taskitty ^.^
-    Taskitty => include_str!("../ascii_art/taskitty.txt").to_string()
+    Taskitty => include_str!("../../assets/taskitty.txt").to_string()
   }
 }
 

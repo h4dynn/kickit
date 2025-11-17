@@ -78,12 +78,12 @@ pub mod hello_sock;
 Open `src/init/kickit.rs`, this is where we will call our
 socket to be started.
 
-In the `main()` function, insert code to start your socket,
-e.g.:
+In the `main()` function, add your socket to the `sockOpen!`
+macro call, e.g.:
 
 ```rust
 use kickit::hello_sock;
-tokio::task::spawn(async move { hello_sock::Hello.open().await.handle(); });
+sockOpen!(socket::Core, socket::Log, hello_sock::Hello);
 ```
 
 Now if you compile `kickit` and run it, you should have

@@ -1,11 +1,13 @@
 //! Sockets for the runfs
 
-use std::{os::unix::net::UnixStream, io::Read};
-use crate::{Data, init::init_console::{KTErrorTrace, KTError, ConvKTError}};
+use std::{os::unix::net::UnixStream, io::{Read, Write}};
+use crate::{Data, init::init_console::{KTErrorTrace, KTError, ConvKTError}, console::HandleKTError};
 
 // The sockets- all of these will have KTSocket implemented
 #[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
 pub struct Core;
+#[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
+pub struct Log;
 #[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
 pub struct Power;
 
@@ -20,7 +22,7 @@ pub trait StreamBytes: Into<UnixStream> + Read
 }
 
 // Limit by the static lifetime because Tokio spawning requires this
-#[doc = include_str!("../docs/Sockets.md")]
+#[doc = include_str!("../docs/Making_a_Socket.md")]
 pub trait KTSocket: 'static
 {
   /*
@@ -107,6 +109,8 @@ pub trait KTSocket: 'static
 impl Core { pub const STATE: u8 = 0x4D; pub const VERSION: u8 = 0x1C;
             pub const TARGET: u8 = 0x7E; pub const PID: u8 = 0xF1; }
 
+impl Log { pub const MASTER: u8 = 0x6C; }
+
 impl Power { pub const SHUTDOWN: u8 = 0xF2; pub const REBOOT: u8 = 0x7E; }
 
 impl StreamBytes for UnixStream
@@ -134,8 +138,8 @@ impl KTSocket for Core
 
   async fn handler(mut stream: UnixStream)
   {
-    use crate::{state, init::target::TARGET_NAME, console::HandleKTError};
-    use std::{io::Write, process};
+    use crate::{state, init::target::TARGET_NAME};
+    use std::process;
 
     macro_rules! fail
     {
@@ -150,10 +154,10 @@ impl KTSocket for Core
 
     match (stream.stream_bytes(1)[0])
     {
-      Core::STATE => stream.write_all(&[state!() as u8]),
+      Self::STATE => stream.write_all(&[state!() as u8]),
       // Add a newline byte, this is our EOL
-      Core::VERSION => stream.write_all(&[crate::VERSION.to_string().as_bytes(), b"\n"].concat()),
-      Core::TARGET =>
+      Self::VERSION => stream.write_all(&[crate::VERSION.to_string().as_bytes(), b"\n"].concat()),
+      Self::TARGET =>
       {
         // Try open the OnceLock here
         if let Some(targetName) = TARGET_NAME.get()
@@ -165,7 +169,7 @@ impl KTSocket for Core
           fail!();
         }
       },
-      Core::PID => stream.write_all(&process::id().to_be_bytes()),
+      Self::PID => stream.write_all(&process::id().to_be_bytes()),
       // Safely ignore newlines
       b'\n' => Ok(()),
       // Send an error for unknown bytes
@@ -174,6 +178,28 @@ impl KTSocket for Core
       .trace(KTError::SocketFail).or_warn();
 
     // Cleanup stream for both input & output- we are done here
+    Self::shutdown(stream).or_warn();
+  }
+}
+
+impl KTSocket for Log
+{
+  const REAL_NAME: &'static str = "Log";
+  const OCTAL_PERMS: Option<u32> = None;
+
+  async fn handler(mut stream: UnixStream)
+  {
+    use crate::init::init_console::MASTER_LOG;
+
+    if (stream.stream_bytes(1) == [Self::MASTER]) && let Ok(log) = MASTER_LOG.lock()
+    {
+      stream.write_all(log.join("\n").as_bytes())
+    }
+    else {
+      stream.write_all(&[0x0f])
+    }
+      .trace(KTError::SocketFail).or_warn();
+
     Self::shutdown(stream).or_warn();
   }
 }
