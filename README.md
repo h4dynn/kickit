@@ -1,4 +1,4 @@
-![kickit](./assets/logo.png)
+<img src="assets/logo.png">
 
 > A simple & robust init system, written in Rust
 
