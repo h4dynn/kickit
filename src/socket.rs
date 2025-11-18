@@ -31,8 +31,8 @@ pub trait KTSocket: 'static
    */
   const REAL_NAME: &'static str;
 
-  // The socket permissions, we set this in open()
-  const OCTAL_PERMS: Option<u32>;
+  // The socket permissions, default is 0o600 (only root can read/write)
+  const OCTAL_PERMS: u32 = 0o600;
 
   /*
    * (note): The handler should be completely errorless, since we don't
@@ -78,8 +78,7 @@ pub trait KTSocket: 'static
        * thanks <https://users.rust-lang.org/t/how-to-manage-permissions-of-a-unixlistener/31039/8>
        * for having an answer for this it really hurt my head
        */
-      // The default permissions are 600 octal (only root can read/write)
-      fs::set_permissions(path, Permissions::from_mode(Self::OCTAL_PERMS.unwrap_or(0o600)))
+      fs::set_permissions(path, Permissions::from_mode(Self::OCTAL_PERMS))
         .context_trace(path, KTError::RunFsFail)?;
 
       // Our runtime for the sockets- should never be dropped
@@ -134,7 +133,7 @@ impl KTSocket for Core
 {
   const REAL_NAME: &'static str = "Core";
   // These permissions dictate that any user can read/write, but not execute
-  const OCTAL_PERMS: Option<u32> = Some(0o666);
+  const OCTAL_PERMS: u32 = 0o666;
 
   async fn handler(mut stream: UnixStream)
   {
@@ -185,7 +184,6 @@ impl KTSocket for Core
 impl KTSocket for Log
 {
   const REAL_NAME: &'static str = "Log";
-  const OCTAL_PERMS: Option<u32> = None;
 
   async fn handler(mut stream: UnixStream)
   {
@@ -208,7 +206,7 @@ impl KTSocket for Log
 impl KTSocket for Power
 {
   const REAL_NAME: &'static str = "Power";
-  const OCTAL_PERMS: Option<u32> = Some(0o644);
+  const OCTAL_PERMS: u32 = 0o644;
 
   async fn handler(_: UnixStream)
   {

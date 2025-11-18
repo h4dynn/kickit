@@ -56,29 +56,29 @@ impl Display for Version
  *   assert_eq!(hex_data("377abcaf271c").unwrap(), vec![0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]);
  * ```
  */
-#[inline] pub fn hex_data(hex: impl Display) -> Result<Data, ParseIntError>
+#[inline] pub fn hex_data(h: impl Display) -> Result<Data, ParseIntError>
 {
   // Open a string on our hex data so we can get a slice of chars from it
-  let stringData = hex.to_string();
+  let hex = h.to_string();
   // The data vector will be increased for each hex
-  let mut data = Data::new();
-  // Increases by 2 for each iteration (each hex should be 2 chars)
-  let mut start: usize = 0;
+  let mut data = Data::with_capacity(hex.len() / 2);
 
-  while (start < stringData.len())
+  /*
+   * I know this is a messy way to do this but its better than
+   * using 'str::from_utf8()' since we don't `.unwrap()` here
+   */
+  for single in (hex.as_bytes().chunks(2)
+                    .map(|chunk| { let mut out = String::new();
+                                    chunk.iter().for_each(|c| out.push(*c as char));
+                                    out }))
   {
-    // Read our hex, which should be 2 bytes
-    let hex = &stringData[start..start + 2];
-    // Add the corresponding byte for the hex using a radix
-    data.push(u8::from_str_radix(hex, 16)?);
-    start += 2;
+    data.push(u8::from_str_radix(&single as &str, 16)?);
   }
 
   Ok(data)
 }
 
-#[must_use]
-pub fn version() -> String
+#[must_use] pub fn version() -> String
 {
   use crate::Release::Stable;
 

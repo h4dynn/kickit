@@ -34,7 +34,7 @@ impl KTSocket for Hello
    * None and provide no octal permissions, the default of
    * 600 will be used (only root has read/write access)
    */
-  const OCTAL_PERMS: Option<u32> = Some(0o666);
+  const OCTAL_PERMS: u32 = 0o666;
 
   // How we handle input & what output we give
   async fn handler(mut stream: UnixStream)
@@ -78,12 +78,12 @@ pub mod hello_sock;
 Open `src/init/kickit.rs`, this is where we will call our
 socket to be started.
 
-In the `main()` function, add your socket to the `sockOpen!`
+In the `main()` function, add your socket to the `socks!`
 macro call, e.g.:
 
 ```rust
 use kickit::hello_sock;
-sockOpen!(socket::Core, socket::Log, hello_sock::Hello);
+socks!(socket::Core, socket::Log, hello_sock::Hello);
 ```
 
 Now if you compile `kickit` and run it, you should have

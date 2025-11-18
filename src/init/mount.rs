@@ -54,13 +54,8 @@ impl fmt::Display for MountOptions
       str_opts.push(',');
     }
 
-    write!(f, "{}", if (str_opts.is_empty())
-    {
-      ""
-    }
-    else {
-      str_opts.strip_suffix(',').expect("MountOptions formatting error")
-    })
+    write!(f, "{}", if (str_opts.is_empty()) { "" }
+    else { str_opts.strip_suffix(',').expect("MountOptions formatting error") })
   }
 }
 

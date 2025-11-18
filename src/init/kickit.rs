@@ -166,7 +166,7 @@ use kickit::{status, console::Colour, stall,
   Ok(())
 }
 
-#[macro_export] macro_rules! sockOpen
+#[macro_export] macro_rules! socks
 {
   ($($sock: path),*) => { $(tokio::task::spawn(async move { $sock.open().await.handle(); });)* };
 }
@@ -213,7 +213,7 @@ use kickit::{status, console::Colour, stall,
   setupRunFs(&target.services, target.debugDump).handle();
 
   // Open our sockets
-  sockOpen!(socket::Core, socket::Log);
+  socks!(socket::Core, socket::Log);
 
   // If we are running alongside another init these things should've already been done
   if (!noInit)
