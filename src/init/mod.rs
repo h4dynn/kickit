@@ -32,7 +32,7 @@ pub(crate) const SHELL: &str = if (cfg!(feature = "posix_sh")) { "/bin/sh" } els
   use crate::{init::init_console::ConvKTError, New};
 
   // Read the cmdline from procfs
-  let kcmdline = fs::read_to_string(New!(PathBuf { "/proc/cmdline" }))
+  let kcmdline = fs::read_to_string(PathBuf::from("/proc/cmdline"))
                     .context_trace("/proc/cmdline", KTError::FileNotFound)?;
 
   // Split the cmdline's parameters by spaces

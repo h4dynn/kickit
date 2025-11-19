@@ -25,7 +25,7 @@ pub static TARGET_NAME: OnceLock<String> = OnceLock::new();
 ///
 pub fn source(name: String) -> Result<self::KTTarget, KTErrorTrace>
 {
-  use crate::{New, init::init_console::{KTError, KTErrorTrace, ConvKTError}};
+  use crate::{init::init_console::{KTError, KTErrorTrace, ConvKTError}};
   use std::fs;
 
   // Read toml contents from target config to string
@@ -43,7 +43,7 @@ pub fn source(name: String) -> Result<self::KTTarget, KTErrorTrace>
                                       &format!("services[] missing in {name}.toml")))
   }?;
   let logLevel = sourcedTarget.log_level.unwrap_or(1);
-  let hostname = sourcedTarget.hostname.unwrap_or(New!(String { "localhost" }));
+  let hostname = sourcedTarget.hostname.unwrap_or(String::from("localhost"));
   let debugDump = sourcedTarget.debug_dump.unwrap_or(false);
 
   if (sourcedTarget.debug_dump.is_some() && !cfg!(debug_assertions))

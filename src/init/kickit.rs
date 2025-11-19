@@ -7,7 +7,7 @@ use std::{fs, fs::File, io::Write, path::PathBuf, process};
 use nix::unistd::getuid as uid;
 use kickit::{status, console::Colour, stall,
              console::{ReturnError, HandleKTError},
-             init::init_console::{KTError, KTErrorTrace, ConvKTError}, init::service::Service, New};
+             init::init_console::{KTError, KTErrorTrace, ConvKTError}, init::service::Service};
 
 ///
 /// # Errors:
@@ -81,9 +81,9 @@ use kickit::{status, console::Colour, stall,
 
     // Create a symlink so it acts as if it is a directory
     //symlink(dumpDir, PathBuf::from("/run/kickit")).trace(KTError::RunFsFail)?;
-    symlink(dumpDir, New!(PathBuf { "/run/kickit" })).trace(KTError::RunFsFail)?;
+    symlink(dumpDir, PathBuf::from("/run/kickit")).trace(KTError::RunFsFail)?;
 
-    fs::create_dir(New!(PathBuf { "/run/kickit/service" })).trace(KTError::RunFsFail)?;
+    fs::create_dir(PathBuf::from("/run/kickit/service")).trace(KTError::RunFsFail)?;
   }
 
   for upService in (services)

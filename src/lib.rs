@@ -69,7 +69,7 @@ impl Display for Version
    */
   for single in (hex.as_bytes().chunks(2)
                     .map(|chunk| { let mut out = String::new();
-                                    chunk.iter().for_each(|c| out.push(*c as char));
+                                    for c in (chunk.iter()) { out.push(*c as char) }
                                     out }))
   {
     data.push(u8::from_str_radix(&single as &str, 16)?);
@@ -251,31 +251,6 @@ impl Display for Version
       tempPath.with_extension($ext)
     }
   };
-}
-
-/*
- * Boilerplate for creating a new default, struct or from something, for example:
- *
- * ```
- *   struct Example { a: String, b: u8, c: bool }
- *
- *   fn example()
- *   {
- *     use crate::New;
- *
- *     let hello = New!(String{ "hello world" });
- *     let empty = New!(String);
- *     let example = New!(Example { a = empty, b = 0, c = false });
- *
- *     dbg!(hello, empty, example);
- *   }
- * ```
- */
-#[macro_export] macro_rules! New
-{
-  ($what: ty) => { { <$what>::default() } };
-  ($what: ty { $($val: ident = $content: expr),* }) => { $what { $($val: $content)* } };
-  ($what: ty { $val: expr }) => { <$what>::from($val) };
 }
 
 // Simple way of returning if a condition equates to true
