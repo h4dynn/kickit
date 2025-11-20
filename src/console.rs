@@ -58,6 +58,8 @@ impl<F: ReturnError> HandleKTError for Option<F>
   fn or_warn(self) { if let Some(e) = self { e.warn() } }
 }
 
+
+
 // Like assert!() but less panicky
 #[macro_export]
 macro_rules! affirm { ($t: expr, $f: expr) => { if (!$t) { return Err($f) } }; }

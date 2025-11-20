@@ -52,7 +52,7 @@ pub trait ConvKTCtlError: Sized
 
 macro_rules! innerFatal
 {
-  ($message: expr) =>
+  (@traceless $message: expr) =>
   {
     use std::process;
 
@@ -61,7 +61,7 @@ macro_rules! innerFatal
     process::exit(1);
   };
 
-  ($message: expr, $context: expr, $trace: expr) =>
+  (@trace $message: expr, $context: expr, $trace: expr) =>
   {
     {
       use std::process;
@@ -81,7 +81,7 @@ macro_rules! innerFatal
 
 impl ReturnError for KTCtlError
 {
-  fn fatal(self) -> ! { innerFatal!(self.to_string()); }
+  fn fatal(self) -> ! { innerFatal!(@traceless self.to_string()); }
 
   fn warn(self) { warn!("{}", self.to_string()); }
 }
@@ -90,7 +90,7 @@ impl ReturnError for KTCtlErrorTrace
 {
   fn fatal(self) -> !
   {
-    innerFatal!(self.kind.to_string(), self.context, self.trace.trim_end_matches('\n'));
+    innerFatal!(@trace self.kind.to_string(), self.context, self.trace.trim_end_matches('\n'));
   }
 
   fn warn(self) { warn!("{}: {}", self.kind.to_string(), self.trace.trim_end_matches('\n')); }

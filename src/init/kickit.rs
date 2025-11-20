@@ -173,7 +173,7 @@ use kickit::{status, console::Colour, stall,
 
 #[tokio::main] async fn main()
 {
-  use kickit::{init::{target, target::TARGET_NAME, cmdlineParam}, socket, socket::KTSocket};
+  use kickit::{init::{target, target::TARGET_NAME, cmdlineParam}, socket, socket::Open};
   use std::{thread, time::Duration, env};
 
   let sysArgs: Vec<String> = env::args().collect();

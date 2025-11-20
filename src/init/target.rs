@@ -23,7 +23,7 @@ pub static TARGET_NAME: OnceLock<String> = OnceLock::new();
 /// * The configuration file couldn't be parsed (usually for bad syntax),
 /// * No services were provided in the configuration
 ///
-pub fn source(name: String) -> Result<self::KTTarget, KTErrorTrace>
+pub fn source(name: String) -> Result<KTTarget, KTErrorTrace>
 {
   use crate::{init::init_console::{KTError, KTErrorTrace, ConvKTError}};
   use std::fs;

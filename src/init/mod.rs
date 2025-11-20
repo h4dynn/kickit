@@ -10,14 +10,15 @@ pub mod mount;
 pub mod service;
 pub mod target;
 
-use std::sync::Mutex;
+use std::sync::OnceLock;
 use crate::init::init_console::{KTError, KTErrorTrace};
 
 pub enum PowerLevel { On = 0, Off = 1, Reboot = 2 }
 
-pub static POWER_LEVEL: Mutex<u8> = Mutex::new(0);
+pub static POWER_LEVEL: OnceLock<u8> = OnceLock::new();
 // The default shell will be bash unless the "posix_sh" feature is set
-pub(crate) const SHELL: &str = if (cfg!(feature = "posix_sh")) { "/bin/sh" } else { "/bin/bash" };
+#[cfg(feature = "posix_sh")] pub(crate) const SHELL: &str = "posix_sh";
+#[cfg(not(feature = "posix_sh"))] pub(crate) const SHELL: &str = "/bin/bash";
 
 ///
 /// # Errors
@@ -29,7 +30,7 @@ pub(crate) const SHELL: &str = if (cfg!(feature = "posix_sh")) { "/bin/sh" } els
 #[inline] pub fn cmdlineParam(param: &str) -> Result<Option<String>, KTErrorTrace>
 {
   use std::{fs, path::PathBuf};
-  use crate::{init::init_console::ConvKTError, New};
+  use crate::init::init_console::ConvKTError;
 
   // Read the cmdline from procfs
   let kcmdline = fs::read_to_string(PathBuf::from("/proc/cmdline"))

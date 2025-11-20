@@ -91,8 +91,8 @@ impl Service
     let path = file_path!(path!(crate::PREFIX, "service"), name, "toml");
 
     // Check the service config exists and is a file
-    if let Ok(meta) = path.metadata() && meta.is_file() { }
-    else {
+    if (!path.is_file())
+    {
       return Err(KTErrorTrace::new(KTError::FileNotFound, &format!("{name}: Service not found")))
     }
 

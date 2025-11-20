@@ -11,6 +11,17 @@ pub const FATAL: &str = "\x1b[1;31m[!]\x1b[0m";
 pub const SERVICE: &str = "\x1b[1;92m[>]\x1b[0m";
 
 /*
+ * This is where our logs from things like `state!()`, `warn!()`
+ * and errors will be stored to (mostly for debugging). Do not
+ * modify this manually, use the `log!()` macro instead
+ */
+#[doc(hidden)]
+pub static MASTER_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+// Just a Result where the error type is of KTErrorTrace
+type KTResult<S> = Result<S, KTErrorTrace>;
+
+/*
  * KTError stores all possible errors that could be thrown
  * Messages and whether the error should send you to an emergency shell
  * or not are defined in the impl
@@ -66,29 +77,24 @@ pub trait ConvKTError
     -> KTResult<Self::OkType>;
 }
 
-// Just a Result where the error type is of KTErrorTrace
-type KTResult<S> = Result<S, KTErrorTrace>;
-
-pub static MASTER_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
 // A traceless, unknown error is the default
 impl Default for KTErrorTrace { fn default() -> Self { KTErrorTrace::new(KTError::default(), "") } }
 
 macro_rules! innerFatal
 {
   // Implementation for a tracless error, just displays the provided message
-  ($error: tt) =>
+  (@traceless $error: tt) =>
   {
-    log!(format!("{}{} {}{}", $crate::init::init_console::FATAL, Colour::BOLD,
-                  $error, Colour::RESET));
+    log!(format!("{}{} {}{}", $crate::init::init_console::FATAL, Colour::BOLD, $error,
+                Colour::RESET));
 
     $error.exit();
   };
 
-  (trace, $error: tt) =>
+  (@trace $error: tt) =>
   {
-    log!(format!("{}{} {}{}{}", $crate::init::init_console::FATAL, Colour::BOLD,
-                  $error.kind, Colour::RESET,
+    log!(format!("{}{} {}{}{}", $crate::init::init_console::FATAL, Colour::BOLD, $error.kind,
+                  Colour::RESET,
                   if let Some(ref a) = $error.context { format!(": {a}") } else { String::new() }));
 
     if (!$error.trace.is_empty())
@@ -108,13 +114,13 @@ macro_rules! innerFatal
  */
 impl ReturnError for KTError
 {
-  fn fatal(self) -> ! { innerFatal!(self); }
+  fn fatal(self) -> ! { innerFatal!(@traceless self); }
   fn warn(self) { warn!("{}", self.to_string()); }
 }
 
 impl ReturnError for KTErrorTrace
 {
-  fn fatal(self) -> ! { innerFatal!(trace, self); }
+  fn fatal(self) -> ! { innerFatal!(@trace self); }
 
   fn warn(self)
   {
@@ -141,10 +147,9 @@ impl KTError
     use std::process;
     use KTError::{AlreadyRunning, NotInit, NotRoot};
 
-    match (self)
+    if (!matches!(self, AlreadyRunning | NotInit | NotRoot))
     {
-      AlreadyRunning | NotInit | NotRoot => (),
-      _ => kickToEmergencyShell()
+      kickToEmergencyShell();
     }
 
     process::exit(1);

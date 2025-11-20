@@ -56,12 +56,11 @@ pub trait KTSocket: 'static
     use std::net;
     stream.shutdown(net::Shutdown::Both).trace(KTError::SocketFail)
   }
+}
 
-  /*
-   * Please *never* try to re-implement this yourself, as it should be
-   * kept the same across all sockets to keep compatibility
-   */
-  fn open(&self) -> impl Future<Output = Result<(), KTErrorTrace>>
+pub trait Open: KTSocket + 'static
+{
+  fn open(&self) -> impl Future<Output = Result<(), KTErrorTrace>> + Send
   {
     async move
     {
@@ -217,3 +216,6 @@ impl KTSocket for Power
     } */
   }
 }
+
+// Blanket implementation
+impl<S: KTSocket + 'static> Open for S {}

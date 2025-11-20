@@ -398,6 +398,7 @@ impl Operation
               // The expected "error" in question: SIGPIPE
               if (error.kind() == ErrorKind::BrokenPipe)
               {
+                // Exit without an error
                 std::process::exit(0);
               }
 
