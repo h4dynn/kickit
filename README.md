@@ -1,9 +1,11 @@
-<img src="assets/logo.svg" alt="kickit" height="300" width="600" style="background-color:transparent">
+![kickit](assets/logo.svg)
 
-> A simple & robust init system, written in Rust
+**A simple & robust init system, written in Rust**
 
 > [!WARNING]
 > `kickit` is a work-in-progress. Many features are unimplemented or unstable.
+
+![Lint](https://github.com/h4dynn/kickit/actions/workflows/clippy.yml/badge.svg?event=push)
 
 # Design
 
