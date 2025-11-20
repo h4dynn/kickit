@@ -1,4 +1,4 @@
-name: Clippy Lint
+name: Clippy Lint (nightly)
 
 on: [push, workflow_dispatch]
 

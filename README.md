@@ -3,7 +3,7 @@
 **A simple & robust init system, written in Rust**
 
 > [!WARNING]
-> `kickit` is a work-in-progress. Many features are unimplemented or unstable.
+> `kickit` is a work-in-progress. Many features are unimplemented or unstable.[^1]
 
 ![Lint](https://github.com/h4dynn/kickit/actions/workflows/clippy.yml/badge.svg?event=push)
 
@@ -19,3 +19,11 @@ Once a service is loaded it cannot be unloaded,
 and new services that are not in the target
 cannot be loaded. (you can, however, restart
 a service)
+
+# Compatibility
+
+Only Linux is supported. Support for other
+platforms is not planned.
+
+[^1]: See [TO-DO.md](TO-DO.md) for the current
+state of the project
