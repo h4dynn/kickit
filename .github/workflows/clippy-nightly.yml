@@ -1,0 +1,25 @@
+name: Clippy Lint
+
+on: [push, workflow_dispatch]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get rust toolkit
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none -y
+          rustup toolchain install nightly --allow-downgrade --profile minimal --component clippy
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: 'main'
+
+      - name: Run clippy
+        run: |
+          # Basically make clippy the most annoying it can be
+          cargo clippy -- -W clippy::pedantic -W clippy::all -D warnings

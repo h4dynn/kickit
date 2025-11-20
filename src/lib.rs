@@ -69,7 +69,7 @@ impl Display for Version
    */
   for single in (hex.as_bytes().chunks(2)
                     .map(|chunk| { let mut out = String::new();
-                                    for c in (chunk.iter()) { out.push(*c as char) }
+                                    for c in (chunk) { out.push(*c as char) }
                                     out }))
   {
     data.push(u8::from_str_radix(&single as &str, 16)?);
