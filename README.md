@@ -25,5 +25,10 @@ a service)
 Only Linux is supported. Support for other
 platforms is not planned.
 
-[^1]: See [TO-DO.md](TO-DO.md) for the current
-state of the project
+# Building
+
+See [Developers.md](https://github.com/h4dynn/kickit/blobs/main/Developers.md)
+for more information on how to build kickit
+
+[^1]: See [TO-DO.md](https://github.com/h4dynn/kickit/blob/main/TO-DO.md)
+for the current state of the project

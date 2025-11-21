@@ -1,4 +1,4 @@
-# kickit sockets
+# Making a socket
 
 ## (0): The socket itself
 
