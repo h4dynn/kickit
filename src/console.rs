@@ -17,10 +17,8 @@ pub trait HandleKTError: Sized
 {
   type OkType;
   type ErrorType: ReturnError;
-
   // handle() functions like unwrap(): Return contents if OK or fatal if not
   fn handle(self) -> Self::OkType;
-
   // Do nothing with OK result, warn on error
   fn or_warn(self);
 }
@@ -58,8 +56,13 @@ impl<F: ReturnError> HandleKTError for Option<F>
   fn or_warn(self) { if let Some(e) = self { e.warn() } }
 }
 
-
-
 // Like assert!() but less panicky
 #[macro_export]
 macro_rules! affirm { ($t: expr, $f: expr) => { if (!$t) { return Err($f) } }; }
+
+/*
+ * Re-export our macro, so it matches our current module path
+ * (i.e. it exports to crate::console::affirm as well as crate::affirm)
+ * (why doesn't rust do this automatically already???)
+ */
+pub use crate::affirm as affirm;

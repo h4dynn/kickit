@@ -1,4 +1,4 @@
-# Developer Guide
+# Building & Testing kickit
 
 ## Building
 
@@ -35,13 +35,13 @@ cd kickit
 
 2. Build it!:
 
-> (release profile)
+> **release** profile
 
 ```bash
 cargo build --release
 ```
 
-> (debug profile)
+> **debug** profile
 
 ```bash
 cargo build
@@ -84,7 +84,8 @@ the current init.
 
 1. If your target isn't called `system`, make sure
    to edit your kernel cmdline to add the
-   `init.target=XXX` parameter.
+   `init.target=XXX` parameter. This tells `kickit`
+   which target we want to use.
 
 2. Either push the `kickit` executable (in
    `target/release/kickit`) to `/usr/sbin/init`

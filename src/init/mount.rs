@@ -61,8 +61,7 @@ impl fmt::Display for MountOptions
 
 impl MountFlags { pub fn push(&mut self, what: MountFlag) { self.inner.push(what) } }
 
-#[macro_export]
-macro_rules! mountflags
+#[macro_export] macro_rules! mountflags
 {
   ($($flag: tt),*) =>
   {
@@ -77,9 +76,9 @@ macro_rules! mountflags
 
   () => { MountFlags::default() };
 }
+pub use crate::mountflags as mountflags;
 
-#[macro_export]
-macro_rules! mountopts
+#[macro_export] macro_rules! mountopts
 {
   ($($opt: tt),*) =>
   {
@@ -95,6 +94,7 @@ macro_rules! mountopts
 
   () => { MountOptions::default() };
 }
+pub use crate::mountopts as mountopts;
 
 // Frontend for nix library's mount function
 ///
@@ -107,7 +107,7 @@ pub fn mount(from: &str, to: &str, fsType: &str, flags: MountFlags, opts: &Mount
   use crate::init::init_console::{KTError, ConvKTError};
 
   nix::mount::mount(Some(from), to, Some(fsType), flags.into(), Some(&*opts.to_string()))
-    .trace(KTError::SysFsMountFail)?;
+    .trace(KTError::SysFsMount)?;
 
   Ok(())
 }
@@ -120,15 +120,15 @@ pub fn unmount(dest: &str) -> Result<(), crate::init::init_console::KTErrorTrace
 {
   use crate::init::init_console::{KTError, ConvKTError};
 
-  nix::mount::umount(dest).trace(KTError::SysFsUnmountFail)?;
+  nix::mount::umount(dest).trace(KTError::SysFsUnmount)?;
   Ok(())
 }
 
-// Check if a path is a mountpoint
 ///
 /// # Errors
 /// * Couldn't read from /proc/mounts
 ///
+/// Check if a path is a mountpoint
 pub fn mounted<P: AsRef<std::path::Path> + std::fmt::Display>(mountpoint: P)
   -> Result<bool, crate::init::init_console::KTErrorTrace>
 {

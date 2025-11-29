@@ -5,7 +5,7 @@ use crate::display_enum;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 #[must_use]
-pub enum InitState { #[default] Ok = 0x02, Emergency = 0xA8, Stalled = 0xDC, Down = 0x20 }
+pub enum InitState { #[default] Ok = 0x02, Emergency = 0xa8, Stalled = 0xdc, Down = 0x20 }
 
 // Setup a global mutex for the state, this can change once locked
 pub static INIT_STATE: Mutex<InitState> = Mutex::new(InitState::Ok);
@@ -21,13 +21,19 @@ impl From<u8> for InitState
   {
     use InitState::{Ok, Emergency, Stalled, Down};
 
-    const OK: u8 = InitState::Ok as u8;
-    const EMERGENCY: u8 = InitState::Emergency as u8;
-    const STALLED: u8 = InitState::Stalled as u8;
+    /*
+     * Rust matching doesn't allow us to put a `x as y` as a
+     * match pattern, so create constants for this instead
+     */
+    const OK: u8 = Ok as u8;
+    const EMERGENCY: u8 = Emergency as u8;
+    const STALLED: u8 = Stalled as u8;
 
     match (byte) { OK => Ok, EMERGENCY => Emergency, STALLED => Stalled, _ => Down }
   }
 }
+
+impl InitState { #[must_use] pub fn is_ok(self) -> bool { self == Self::Ok } }
 
 // Open and close a lock on the Mutex to find the state without using another thread
 #[macro_export] macro_rules! state
@@ -43,3 +49,4 @@ impl From<u8> for InitState
     }
   };
 }
+pub use crate::state as state;

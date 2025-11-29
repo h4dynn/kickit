@@ -19,6 +19,7 @@ pub mod socket;
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug, Default)]
 pub enum Release { Stable, Testing, #[default] Unstable }
+
 #[derive(Eq, PartialEq, Copy, Clone, Debug, Default)]
 pub struct Version(u8, u8, u8);
 
@@ -49,11 +50,11 @@ impl Display for Version
  * Convert a string of hex to a vector of bytes, for example:
  *
  * ```
- *   // This *should* never panic
+ *   // This should never panic
  *   assert_eq!(hex_data("48656c6c6f").unwrap().as_slice(), "Hello".as_bytes());
  *
  *   // ...and neither should this
- *   assert_eq!(hex_data("377abcaf271c").unwrap(), vec![0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]);
+ *   assert_eq!(*hex_data("377abcaf271c").unwrap(), [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]);
  * ```
  */
 #[inline] pub fn hex_data(h: impl Display) -> Result<Data, ParseIntError>
@@ -143,7 +144,7 @@ impl Display for Version
    *   }
    * ```
    */
-  { $($what: ty { $($variant: path => $fmt: expr),* }),* } =>
+  { $($what: ty { $($variant: pat => $fmt: expr),* }),* } =>
   {
     $(impl std::fmt::Display for $what
     {
@@ -157,26 +158,6 @@ impl Display for Version
     })*
   };
 
-  /*
-   * Display a variant as just its name, for example:
-   *
-   * ```
-   *   use crate::display_enum;
-   *
-   *   #[derive(Debug)] enum Finished { Ray = 1, Chloe = 2, Jayden = 3 }
-   *
-   *   // Each variant in `Finished` will be displayed as its name
-   *   display_enum! { Finished }
-   *
-   *   fn main()
-   *   {
-   *     // This will display "...and finishing first place: Ray"
-   *     eprintln!("...and finishing first place: {}", Finished::Ray);
-   *   }
-   * ```
-   *
-   * (note): This *depends* on your enum implementing std::fmt::Debug
-   */
   { $($what: ty),* } =>
   {
     $(impl std::fmt::Display for $what
@@ -191,16 +172,45 @@ impl Display for Version
       }
     })*
   };
+
+  /*
+   * Display a variant as its representing value, for example:
+   *
+   * ```
+   *   use crate::display_enum;
+   *
+   *   #[derive(Debug)] enum Member { Ray = 130, Chloe = 622, Jayden = 905 }
+   *
+   *   // Each variant will be displayed as their ID
+   *   display_enum! { Member as u128 }
+   *
+   *   fn main()
+   *   {
+   *     // This will display "Chloe's member ID is: 622"
+   *     eprintln!("Chloe's member ID is: {}", Member::Chloe);
+   *   }
+   * ```
+   */
+  { $(what: ty as $repr: ty),* } =>
+  {
+    $(impl std::fmt::Display for $what
+    {
+      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error>
+      {
+        write!(f, "{}", self as $repr)
+      }
+    })*
+  };
 }
 
 /*
- * Concatenate multiple directories together into a PathBuf, for example:
+ * Concatenate multiple files/directories together into a PathBuf, for example:
  *
  * ```
  *   // Setup the configuration prefix that can be changed
  *   pub const CONFIG_PREFIX: &str = "/etc";
  *
- *   fn config_exists() -> bool
+ *   fn configExists() -> bool
  *   {
  *     use std::fs;
  *     use crate::path;
@@ -229,7 +239,7 @@ impl Display for Version
  * Create a file PathBuf which ends in an extension, for example:
  *
  * ```
- *   fn has_system_target() -> bool
+ *   fn hasSystemTarget() -> bool
  *   {
  *     use std::fs;
  *     use crate::{file_path, path};
@@ -258,6 +268,29 @@ impl Display for Version
 {
   ($condition: expr) => { if ($condition) { return } };
   ($condition: expr, $val: path) => { if ($condition) { return $val } };
+}
+
+#[macro_export]
+macro_rules! letOnceLock
+{
+  { let $oncelock: path = $val: expr } =>
+  {
+    /*
+     * Check OnceLock doesn't already have a value- it shouldn't because
+     * this should be the first and only time our method is called
+     */
+    if ($oncelock.get().is_some())
+    {
+      Err(KTErrorTrace::new(KTError::Unknown, "OnceLock already has a value!"))
+    }
+    else if ($oncelock.set($val).is_err())
+    {
+      Err(KTErrorTrace::new(KTError::Unknown, "Failed to set a OnceLock!"))
+    }
+    else {
+      Ok(())
+    }
+  };
 }
 
 // Detect this at compile-time to avoid headaches

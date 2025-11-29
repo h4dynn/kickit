@@ -3,8 +3,11 @@
 
 # kickit
 
-- [ ] Make an io.Power socket, for user power control
+- [x] Make an io.Power socket, for user power control
       (shutdown/reboot)
+
+- [ ] Add partial compatibility with `systemd`
+      (programs that depend on systemd)
 
 # ktctl
 

@@ -13,9 +13,11 @@ pub mod target;
 use std::sync::OnceLock;
 use crate::init::init_console::{KTError, KTErrorTrace};
 
-pub enum PowerLevel { On = 0, Off = 1, Reboot = 2 }
+#[derive(Eq, PartialEq, Copy, Clone, Debug)]
+pub enum PowerLevel { Off, Reboot }
 
-pub static POWER_LEVEL: OnceLock<u8> = OnceLock::new();
+pub static POWER_LEVEL: OnceLock<PowerLevel> = OnceLock::new();
+pub static UP_SERVICES: OnceLock<Vec<String>> = OnceLock::new();
 // The default shell will be bash unless the "posix_sh" feature is set
 #[cfg(feature = "posix_sh")] pub(crate) const SHELL: &str = "posix_sh";
 #[cfg(not(feature = "posix_sh"))] pub(crate) const SHELL: &str = "/bin/bash";
@@ -26,7 +28,7 @@ pub static POWER_LEVEL: OnceLock<u8> = OnceLock::new();
 /// * /proc/cmdline couldn't be accessed for whatever reason,
 /// * Specified command-line param wasn't found
 ///
-// Get a command-line parameter using the /proc/cmdline file
+/// Get a command-line parameter using the /proc/cmdline file
 #[inline] pub fn cmdlineParam(param: &str) -> Result<Option<String>, KTErrorTrace>
 {
   use std::{fs, path::PathBuf};
@@ -59,5 +61,20 @@ pub static POWER_LEVEL: OnceLock<u8> = OnceLock::new();
   }
 
   // Command-line parameter was not found at all
-  Err(KTErrorTrace::with_context(KTError::CmdlineFail, param, ""))
+  Err(KTErrorTrace::with_context(KTError::Cmdline, param, ""))
+}
+
+impl PowerLevel
+{
+  #[must_use] pub fn from_byte(byte: u8) -> Option<Self>
+  {
+    use crate::socket::Power;
+
+    match (byte)
+    {
+      Power::SHUTDOWN => Some(Self::Off),
+      Power::REBOOT => Some(Self::Reboot),
+      _ => None
+    }
+  }
 }

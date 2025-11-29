@@ -27,7 +27,7 @@ platforms is not planned.
 
 # Building
 
-See [Developers.md](https://github.com/h4dynn/kickit/blobs/main/Developers.md)
+See [Building.md](https://github.com/h4dynn/kickit/blobs/main/Building.md)
 for more information on how to build kickit
 
 [^1]: See [TO-DO.md](https://github.com/h4dynn/kickit/blob/main/TO-DO.md)

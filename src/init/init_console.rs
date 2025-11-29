@@ -2,7 +2,7 @@
 
 use std::{sync::Mutex, fmt::Display};
 use thiserror::Error;
-use crate::{console::Colour, log, warn, console::ReturnError, state::InitState};
+use crate::{console::Colour, console::ReturnError, state::InitState};
 
 // The marker for each of these display types
 pub const STATUS: &str = "\x1b[1m[*]\x1b[0m";
@@ -30,27 +30,37 @@ type KTResult<S> = Result<S, KTErrorTrace>;
 #[must_use]
 pub enum KTError
 {
+  // A generic error- usually for internal errors / bugs
   #[error("An unknown error occurred")] #[default] Unknown,
+  // Errors when starting up the init system
   #[error("kickit is already running!")] AlreadyRunning,
   #[error("kickit must be ran as the init process")] NotInit,
   #[error("Insufficient permissions: kickit can only be ran as root")] NotRoot,
+  // File-related errors i.e. can't access or permission denied
   #[error("File or directory not found")] FileNotFound,
-  #[error("Failed to format content in UTF-8")] FormatFail,
-  #[error("A required value is missing in target configuration")] TargetMissingValue,
-  #[error("Failed to parse target configuration file")] TargetParseFail,
   #[error("Failed to setup work directory")] RunFsFail,
-  #[error("Failed to read from a socket")] SocketFail,
-  #[error("Kernel command-line parameter not found")] CmdlineFail,
-  #[error("Failed to parse service configuration file")] ServiceParseFail,
-  #[error("Failed to access logs from service")] ServiceAccessFail,
-  #[error("Failed to start a service")] ServiceUpFail,
-  #[error("Failed to stop a service")] ServiceDownFail,
-  #[error("Failed to start a logger for a service")] ServiceLogFail,
+  #[error("Kernel command-line parameter not found")] Cmdline,
+  // When data can't be represented as a UTF-8 string
+  #[error("Failed to format content in UTF-8")] Format,
+  // Target-related errors (see how they are used in `src/target.rs`)
+  #[error("A required value is missing in target configuration")] TargetMissingValue,
+  #[error("Failed to parse target configuration file")] TargetParse,
+  // Socket data input/output failure
+  #[error("Failed to read from a socket")] Socket,
+  // Service-related errors (used in `src/service.rs`)
+  #[error("Failed to parse service configuration file")] ServiceParse,
+  #[error("Failed to access logs from service")] ServiceAccess,
+  #[error("Failed to start a service")] ServiceUp,
+  #[error("Failed to stop a service")] ServiceDown,
+  #[error("Failed to start a logger for a service")] ServiceLog,
   #[error("Service was killed or stopped")] ServiceNotRunning,
   #[error("Service became a zombie")] ServiceZombified,
-  #[error("Failed to access a logfile")] AccessLogFail,
-  #[error("Failed to mount a critical filesystem")] SysFsMountFail,
-  #[error("Failed to unmount a filesystem")] SysFsUnmountFail
+  #[error("Failed to access a logfile")] AccessLog,
+  // Mount-related failures
+  #[error("Failed to mount a critical filesystem")] SysFsMount,
+  #[error("Failed to unmount a filesystem")] SysFsUnmount,
+  // Pure init errors
+  #[error("Failed to shutdown the init system")] Shutdown
 }
 
 // This stores an error (in kind) and an error trace/"context" (in trace)
@@ -177,20 +187,13 @@ impl<S, F: Display> ConvKTError for Result<S, F>
 
   fn trace(self, errorKind: KTError) -> KTResult<Self::OkType>
   {
-    match (self)
-    {
-      Err(e) => Err(KTErrorTrace::new(errorKind, &e)),
-      Ok(c)  => Ok(c)
-    }
+    self.map_err(|e| KTErrorTrace::new(errorKind, &e))
   }
+
   fn context_trace(self, context: impl ToString, errorKind: KTError)
     -> KTResult<Self::OkType>
   {
-    match (self)
-    {
-      Err(e) => Err(KTErrorTrace::with_context(errorKind, &context, &e)),
-      Ok(c)  => Ok(c)
-    }
+    self.map_err(|e| KTErrorTrace::with_context(errorKind, &context, &e))
   }
 }
 
@@ -201,20 +204,20 @@ impl<F: Display> ConvKTError for Option<F>
 
   fn trace(self, errorKind: KTError) -> KTResult<()>
   {
-    if let Some(einfo) = self
+    if let Some(e) = self.map(|why| KTErrorTrace::new(errorKind, &why))
     {
-      Err(KTErrorTrace::new(errorKind, &einfo))
+      Err(e)
     }
     else {
       Ok(())
     }
   }
-  fn context_trace(self, context: impl ToString, errorKind: KTError)
-    -> KTResult<Self::OkType>
+
+  fn context_trace(self, context: impl ToString, errorKind: KTError) -> KTResult<()>
   {
-    if let Some(einfo) = self
+    if let Some(e) = self.map(|why| KTErrorTrace::with_context(errorKind, &context, &why))
     {
-      Err(KTErrorTrace::with_context(errorKind, &context, &einfo))
+      Err(e)
     }
     else {
       Ok(())
@@ -291,6 +294,7 @@ fn kickToEmergencyShell()
     }
   };
 }
+pub use crate::log as log;
 
 #[macro_export] macro_rules! stall
 {
@@ -310,24 +314,28 @@ fn kickToEmergencyShell()
     thread::sleep(Duration::new(u64::MAX, 0));
   };
 }
+pub use crate::stall as stall;
 
 #[macro_export] macro_rules! status
 {
   ($($message: tt)*) =>
   {
     {
-      $crate::log!(format!("{} {}", $crate::init::init_console::STATUS, format!($($message)*)))
+      $crate::init::init_console::log!(format!("{} {}", $crate::init::init_console::STATUS,
+                                        format!($($message)*)))
     }
   };
 }
+pub use crate::status as status;
 
 #[macro_export] macro_rules! warn
 {
   ($($message: tt)*) =>
   {
     {
-      $crate::log!(format!("{} {}{}{}", $crate::init::init_console::WARN, Colour::BOLD,
-                            format!($($message)*), Colour::RESET))
+      $crate::init::init_console::log!(format!("{} {}{}{}", $crate::init::init_console::WARN,
+                                              Colour::BOLD, format!($($message)*), Colour::RESET))
     }
   };
 }
+pub use crate::warn as warn;

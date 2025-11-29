@@ -5,17 +5,17 @@
 
 extern crate chrono;
 
-use std::{fs, fs::File, path::PathBuf, ffi::OsString, fmt::Display};
+use std::{fs, fs::File, path::PathBuf, ffi::OsString};
 use kickit::{console::{HandleKTError, Colour},
               ktctl::ktctl_console::{KTCtlErrorTrace, ConvKTCtlError, KTCtlError},
-              affirm, display_enum, binary, path, state::InitState, Data};
+              console::affirm, display_enum, binary, path, state::InitState, Data};
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 #[must_use]
 enum Operation { Help(Option<String>), Version, ServiceList(Vec<String>),
                   State, Log(String, bool, bool), TargetInfo,
                   // The `bool`s in shutdown/reboot are for forcing or not
-                  Shutdown(bool), Reboot(bool) }
+                  Shutdown, Reboot }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 enum Usage
@@ -32,16 +32,45 @@ struct Init;
 #[derive(PartialEq, Eq, Clone, Debug)]
 struct Service { name: String }
 
-// Possible socket requests, like e.g. core or power
-mod SocketRequest
+trait SocketRequest: Sized
 {
-  use kickit::socket;
-
   /*
    * Provide a matching input byte for the socket request, this is what we
    * will write to the socket to send the request, and receive output data
    */
-  pub(super) trait Byte { fn in_byte(self) -> u8; }
+  fn in_byte(&self) -> u8;
+
+  // The name for the socket we access
+  fn name(&self) -> String;
+
+  fn request(self) -> Result<Data, KTCtlErrorTrace>
+  {
+    use std::{os::unix::net::UnixStream, io::{Read, Write}};
+
+    let path = format!("/run/kickit/io.{}", self.name());
+
+    let mut io = UnixStream::connect(&path).context_trace(&path, KTCtlError::SocketAccessFail)?;
+    let mut out = Data::new();
+
+    io.write_all(&[self.in_byte()]).trace(KTCtlError::AccessRunFsFail)?;
+    io.read_to_end(&mut out).context_trace("io.Core", KTCtlError::SocketAccessFail)?;
+
+    // An 0x0f byte means the operation failed
+    if (out.as_slice() == [0x0f])
+    {
+      Err(KTCtlErrorTrace::new(KTCtlError::SocketAccessFail,
+          &format!("Error returned by init after requesting {}", self.name())))
+    }
+    else {
+      Ok(out)
+    }
+  }
+}
+
+// Possible socket requests, like e.g. core or power
+mod Socket
+{
+  use kickit::socket;
 
   #[derive(PartialEq, Eq, Copy, Clone, Debug)]
   pub(super) enum Core
@@ -51,39 +80,42 @@ mod SocketRequest
     Target = socket::Core::TARGET as isize,
     Pid = socket::Core::PID as isize
   }
-  /*
   #[derive(PartialEq, Eq, Copy, Clone, Debug)]
   pub(super) enum Power
   {
     Shutdown = socket::Power::SHUTDOWN as isize,
     Reboot = socket::Power::REBOOT as isize
   }
-  */
 
   /*
    * This is just boilerplate implementation, so we use a macro to
    * make it look less ugly
    */
-  macro_rules! impl_Byte
+  macro_rules! impl_SocketRequest
   {
     { for $($name: ty),* } =>
     {
-      $(impl Byte for $name { fn in_byte(self) -> u8 { self as u8 } })*
+      $(impl super::SocketRequest for $name
+      {
+        fn in_byte(&self) -> u8 { *self as u8 }
+        fn name(&self) -> String { self.to_string() }
+      })*
     }
   }
 
-  impl_Byte! { for Core }
+  impl_SocketRequest! { for Core, Power }
 }
 
-display_enum! { SocketRequest::Core }
+display_enum! { Socket::Core { _ => "Core" }, Socket::Power { _ => "Power" } }
 display_enum!
 {
   // Show the usage prompts for the help operation
   Usage {
     Main =>
-      format!("{}{b}{}{r}{}\n{}\n\n{b}{}{r}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n",
+      format!("{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}\n{}\n",
               "Usage: ", binary!(), " [OPERATION]",
               "Manage the kickit init system",
+              "",
               "Operations:",
               " help                  Show this help prompt",
               " version               Show kickit version",
@@ -93,12 +125,14 @@ display_enum!
               " target                Show current loaded target",
               " shutdown [--force]    Shutdown this device",
               " reboot [--force]      Reboot this device",
+              "",
               "Try 'ktctl help [OPERATION]' for more info",
               b = Colour::BOLD, r = Colour::RESET),
 
-    Log => format!("{}{}{b}{}{r}{}\n{}\n\n{b}{}{r}\n{}\n{}\n",
+    Log => format!("{}{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n",
                   "Usage: ", binary!(), " log", " [ARGUMENTs..] [SERVICE]",
                   "View a service's logs (requires root access)",
+                  "",
                   "Arguments:",
                   " --plain              Plain output (no colours + timestamp as millis)",
                   " --service-only       Ignore any messages from init",
@@ -129,28 +163,9 @@ impl From<&str> for Usage
 impl Usage
 {
   // Check if a string is a valid variant of usage
-  fn valid(w: &str) -> bool { matches!(w, "" | "log" | "service" | "shutdown" | "reboot" | "purr") }
-}
-
-fn readSocket<R: SocketRequest::Byte + Display + Copy>(req: R) -> Result<Data, KTCtlErrorTrace>
-{
-  use std::{os::unix::net::UnixStream, io::{Read, Write}};
-
-  let mut io = UnixStream::connect("/run/kickit/io.Core")
-                      .context_trace("io.Core", KTCtlError::SocketAccessFail)?;
-  let mut out = Data::new();
-
-  io.write_all(&[req.in_byte()]).trace(KTCtlError::AccessRunFsFail)?;
-  io.read_to_end(&mut out).context_trace("io.Core", KTCtlError::SocketAccessFail)?;
-
-  // An 0x0f byte means the operation failed
-  if (out.as_slice() == [0x0f])
+  fn valid(w: &str) -> bool
   {
-    Err(KTCtlErrorTrace::new(KTCtlError::SocketAccessFail,
-        &format!("Error returned by init after requesting {req}")))
-  }
-  else {
-    Ok(out)
+    matches!(w, "" | "log" | "service" | "shutdown" | "reboot" | "purr")
   }
 }
 
@@ -158,15 +173,15 @@ impl Init
 {
   pub fn state() -> InitState
   {
-    if let Ok(state) = readSocket(SocketRequest::Core::State)
+    if let Ok(state) = Socket::Core::State.request()
     {
       match (state[0].into())
       {
         InitState::Emergency | InitState::Stalled => return state[0].into(),
         InitState::Ok =>
         {
-          if let Ok(s) = readSocket(SocketRequest::Core::Version) &&
-            (s == format!("{}\n", kickit::VERSION).as_bytes())
+          if (Socket::Core::Version.request() ==
+                        Ok(format!("{}\n", kickit::VERSION).as_bytes().to_vec()))
           {
             return InitState::Ok
           }
@@ -190,11 +205,10 @@ impl Init
     };
     let addon = if (state == Ok)
     {
-      let initPid = u32::from_be_bytes(match (readSocket(SocketRequest::Core::Pid)?.try_into())
-      {
-        Result::Ok(s) => Result::Ok(s),
-        Err(..) => Err(KTCtlErrorTrace::new(KTCtlError::FormatFail, "Invalid init pid!"))
-      }?);
+      let initPid = u32::from_be_bytes(Socket::Core::Pid.request()?
+                                        .try_into()
+                                        .map_err(|_| KTCtlErrorTrace::new(KTCtlError::Format,
+                                                  "Invalid init pid!"))?);
 
       if (initPid == 1)
       {
@@ -369,7 +383,7 @@ impl Operation
             }
             else {
               // Convert the millis type from a String to i64 so it is accepted by chrono
-              let timestampUgly: i64 = timestamp.parse().trace(KTCtlError::FormatFail)?;
+              let timestampUgly: i64 = timestamp.parse().trace(KTCtlError::Format)?;
 
               /*
                * Get the timestamp from the log and convert it into an actual date & time,
@@ -403,7 +417,7 @@ impl Operation
               }
 
               // An *actual* error was found
-              Err(error).trace(KTCtlError::FormatFail)?;
+              Err(error).trace(KTCtlError::Format)?;
             }
           }
 
@@ -417,7 +431,7 @@ impl Operation
         {
           // Must be the 14th byte or else something is wrong
           affirm!(timestamp.len() == 13 && logContents.is_empty(),
-              KTCtlErrorTrace::with_context(KTCtlError::FormatFail, &serviceName,
+              KTCtlErrorTrace::with_context(KTCtlError::Format, &serviceName,
                                             "Unexpected byte 0x8F"));
 
           fromInit = true;
@@ -441,22 +455,21 @@ impl Operation
 
   fn getTarget() -> Result<(), KTCtlErrorTrace>
   {
-    eprint!("{}", String::from_utf8(readSocket(SocketRequest::Core::Target)?)
-                              .context_trace("target", KTCtlError::FormatFail)?);
+    eprint!("{}", String::from_utf8(Socket::Core::Target.request()?)
+                              .context_trace("target", KTCtlError::Format)?);
     Ok(())
   }
 
-  fn shutdown(_force: bool) -> !
+  fn shutdown() -> Result<(), KTCtlErrorTrace>
   {
-    use kickit::console::ReturnError;
-    use nix::sys::reboot::{reboot, RebootMode::RB_POWER_OFF};
-
-    reboot(RB_POWER_OFF).trace(KTCtlError::AccessRunFsFail).unwrap_err().fatal();
+    use std::{thread, time::Duration};
+    Socket::Power::Shutdown.request().map(|_| thread::sleep(Duration::new(u64::MAX, 0)))
   }
 
-  fn reboot(_force: bool) -> !
+  fn reboot() -> Result<(), KTCtlErrorTrace>
   {
-    todo!();
+    use std::{thread, time::Duration};
+    Socket::Power::Reboot.request().map(|_| thread::sleep(Duration::new(u64::MAX, 0)))
   }
 
   #[inline] fn usage(operation: Option<&String>) -> Result<(), KTCtlErrorTrace>
@@ -494,14 +507,14 @@ impl Operation
   {
     use nix::unistd::getuid;
 
-    if (matches!(self, Operation::Log(..) | Operation::Shutdown(..) | Operation::Reboot(..)))
+    if (matches!(self, Operation::Log(..) | Operation::Shutdown | Operation::Reboot))
     {
       affirm!(getuid().is_root(),
         KTCtlErrorTrace::new(KTCtlError::BadPerms, ""));
     }
 
     if (matches!(self, Operation::TargetInfo | Operation::ServiceList(..) | Operation::Log(..) |
-                       Operation::Shutdown(..) | Operation::Reboot(..)))
+                       Operation::Shutdown | Operation::Reboot))
     {
       affirm!(Init::is_running(),
         KTCtlErrorTrace::new(KTCtlError::InitNotRunning, "Init process not found"));
@@ -510,8 +523,7 @@ impl Operation
     Ok(())
   }
 
-  #[inline]
-  pub fn run(self) -> Result<(), KTCtlErrorTrace>
+  #[inline] pub fn run(self) -> Result<(), KTCtlErrorTrace>
   {
     use Operation::{Help, Version, TargetInfo, ServiceList, State, Log, Shutdown, Reboot};
     match (self)
@@ -520,7 +532,7 @@ impl Operation
       TargetInfo => Ok(Self::getTarget()?), ServiceList(service) => Ok(Self::services(&service)?),
       State => { Init::prettyState()?; Ok(()) },
       Log(service, ugly, ignoreInit) => Ok(Self::readLog(&service as &str, ugly, ignoreInit)?),
-      Shutdown(force) => Self::shutdown(force), Reboot(force) => Self::reboot(force)
+      Shutdown => Ok(Self::shutdown()?), Reboot => Self::reboot()
     }
   }
 }
@@ -535,12 +547,12 @@ fn cliArguments(arguments: &[String]) -> Result<Operation, KTCtlErrorTrace>
     "version" => Ok(Operation::Version),
     "target" => Ok(Operation::TargetInfo),
     "state" => Ok(Operation::State),
-    "help" => Ok(if (arguments.len() == 2) { Operation::Help(None) }
-                  else { Operation::Help(Some(arguments[2].clone())) }
-              ),
-    "service" => Ok(if (arguments.len() == 2) { Operation::ServiceList(Vec::new()) }
-                    else { Operation::ServiceList(arguments[2..].into()) }
-              ),
+    "help" =>
+      Ok(if (arguments.len() == 2) { Operation::Help(None) }
+          else { Operation::Help(Some(arguments[2].clone())) }),
+    "service" =>
+      Ok(if (arguments.len() == 2) { Operation::ServiceList(Vec::new()) }
+          else { Operation::ServiceList(arguments[2..].into()) }),
     "log" =>
     {
       // Must be at least log + service name
@@ -569,8 +581,8 @@ fn cliArguments(arguments: &[String]) -> Result<Operation, KTCtlErrorTrace>
 
       Ok(Operation::Log(serviceName, ugly, ignoreInit))
     },
-    "shutdown" => Ok(Operation::Shutdown(arguments.len() > 2 && &arguments[2] == "--force")),
-    "reboot" => Ok(Operation::Reboot(arguments.len() > 2 && &arguments[2] == "--force")),
+    "shutdown" => Ok(Operation::Shutdown),
+    "reboot" => Ok(Operation::Reboot),
     // Unknown operation
     _ => Err(KTCtlErrorTrace::new(KTCtlError::InvalidOperation, &arguments[1]))
   }

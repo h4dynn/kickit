@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 use std::fmt::Display;
-use crate::{binary, warn, console::{Colour, ReturnError}};
+use crate::{binary, console::{Colour, ReturnError}, init::init_console::warn};
 
 #[derive(PartialEq, Eq, Clone, Error, Debug)]
 #[must_use]
@@ -16,7 +16,7 @@ pub enum KTCtlError
   #[error("kickit is not running")] InitNotRunning,
   #[error("Failed to access kickit work directory")] AccessRunFsFail,
   #[error("An unrecognised service was provided")] BadService,
-  #[error("Invalid file encoding (expected UTF-8)")] FormatFail,
+  #[error("Invalid file encoding (expected UTF-8)")] Format,
   #[error("Failed to access log file from service")] LogAccessFail,
   #[error("Failed to parse init work data")] RunFsParseFail,
   #[error("Failed to access a socket")] SocketAccessFail

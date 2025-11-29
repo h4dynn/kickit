@@ -33,22 +33,19 @@ pub fn source(name: String) -> Result<KTTarget, KTErrorTrace>
                     .trace(KTError::FileNotFound)?;
 
   // Source the configuration
-  let sourcedTarget: KTTargetSource = toml::from_str(&targetToml).trace(KTError::TargetParseFail)?;
+  let sourcedTarget: KTTargetSource = toml::from_str(&targetToml).trace(KTError::TargetParse)?;
+
+  let services = sourcedTarget.services.ok_or(KTErrorTrace::new(KTError::TargetMissingValue,
+                                                  &format!("services[] missing in {name}.toml")))?;
 
   // Set our target values or the default if not specified in sourced config
-  let services = match (sourcedTarget.services)
-  {
-    Some(s) => Ok(s),
-    None    => Err(KTErrorTrace::new(KTError::TargetMissingValue,
-                                      &format!("services[] missing in {name}.toml")))
-  }?;
   let logLevel = sourcedTarget.log_level.unwrap_or(1);
   let hostname = sourcedTarget.hostname.unwrap_or(String::from("localhost"));
   let debugDump = sourcedTarget.debug_dump.unwrap_or(false);
 
   if (sourcedTarget.debug_dump.is_some() && !cfg!(debug_assertions))
   {
-    use crate::{warn, console::Colour};
+    use crate::{init::init_console::warn, console::Colour};
     // This will have no effect on release builds
     warn!("debug dump is enabled in target '{name}', but you are using a release build");
   }

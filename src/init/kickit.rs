@@ -5,9 +5,9 @@
 
 use std::{fs, fs::File, io::Write, path::PathBuf, process};
 use nix::unistd::getuid as uid;
-use kickit::{status, console::Colour, stall,
-             console::{ReturnError, HandleKTError},
-             init::init_console::{KTError, KTErrorTrace, ConvKTError}, init::service::Service};
+use kickit::{console::Colour, console::{ReturnError, HandleKTError},
+             init::{init_console::{KTError, KTErrorTrace, ConvKTError, status, stall},
+                    service::Service, UP_SERVICES}, letOnceLock};
 
 ///
 /// # Errors:
@@ -17,7 +17,7 @@ use kickit::{status, console::Colour, stall,
 ///
 #[inline] fn sanity(sideInit: bool) -> Result<(), KTError>
 {
-  use kickit::{affirm, warn};
+  use kickit::{console::affirm, init::init_console::warn};
   // If /run/kickit is already there then another kickit is running
   affirm!(fs::metadata("/run/kickit").is_err(), KTError::AlreadyRunning);
 
@@ -106,8 +106,8 @@ use kickit::{status, console::Colour, stall,
 
 #[inline] fn mountSysFilesystems() -> Result<(), KTErrorTrace>
 {
-  use kickit::{mountflags, mountopts,
-                init::mount::{MountFlag::{NoSuid, NoDev, NoExec}, mount, unmount, mounted}};
+  use kickit::init::mount::{MountFlag::{NoSuid, NoDev, NoExec},
+                            mount, unmount, mounted, mountflags, mountopts};
 
   macro_rules! mounter
   {
@@ -142,14 +142,14 @@ use kickit::{status, console::Colour, stall,
 
 #[inline] fn startServices(services: Vec<Service>) -> Result<(), KTErrorTrace>
 {
-  use kickit::{init::service::Pattern::Standard, state, state::InitState};
+  use kickit::{init::service::Pattern::Standard, state};
 
   for mut upService in (services)
   {
     status!("Starting service: {}", upService.name);
 
     // Don't continue starting services if we are stalled
-    if (state!() == InitState::Stalled) { stall!(); }
+    if (!state!().is_ok()) { stall!(); }
 
     if let Err(trace) = upService.up()
     {
@@ -159,21 +159,54 @@ use kickit::{status, console::Colour, stall,
     else if (upService.pattern == Standard)
     {
       // Spawn the service watcher on another thread
-      tokio::task::spawn(async move { upService.watchService().handle() });
+      tokio::task::spawn(async move { upService.watch().handle() });
     }
   }
 
   Ok(())
 }
 
-#[macro_export] macro_rules! socks
+fn watchPowerLevel() -> !
 {
-  ($($sock: path),*) => { $(tokio::task::spawn(async move { $sock.open().await.handle(); });)* };
+  use kickit::init::{PowerLevel, POWER_LEVEL};
+  use nix::sys::reboot::{reboot, RebootMode};
+  use std::{thread, time::Duration};
+
+  let mode = loop
+  {
+    // Repeat this loop every half a second to prevent using too many CPU cycles
+    thread::sleep(Duration::from_millis(500));
+
+    match (POWER_LEVEL.get())
+    {
+      Some(&PowerLevel::Off) => break RebootMode::RB_HALT_SYSTEM,
+      Some(&PowerLevel::Reboot) => break RebootMode::RB_AUTOBOOT,
+      // No power signal was found, move on
+      None => ()
+    }
+  };
+
+  /* for service in (UP_SERVICES.get().unwrap())
+  {
+    // Wait for each of the services to stop
+    while (Service::is_up(service)) {}
+  } */
+
+  /*
+   * This will never ever return unless an error occurrs so we will
+   * unwrap this & handle it
+   */
+  reboot(mode).trace(KTError::Shutdown).unwrap_err().fatal();
+}
+
+macro_rules! socks
+{
+  ($($sock: path),*) => { $(tokio::task::spawn(async move { $sock.start().await.handle(); });)* };
 }
 
 #[tokio::main] async fn main()
 {
-  use kickit::{init::{target, target::TARGET_NAME, cmdlineParam}, socket, socket::Open};
+  use kickit::{init::{target, target::TARGET_NAME, cmdlineParam}, socket, socket::Start};
   use std::{thread, time::Duration, env};
 
   let sysArgs: Vec<String> = env::args().collect();
@@ -197,14 +230,7 @@ use kickit::{status, console::Colour, stall,
   status!("Target: {targetName}");
   let target = target::source(String::from(targetName)).handle();
 
-  if (TARGET_NAME.get().is_some())
-  {
-    Err(KTErrorTrace::new(KTError::Unknown, "TARGET_NAME already has a value!"))
-  }
-  else {
-    TARGET_NAME.set(String::from(targetName)).trace(KTError::Unknown)
-  }
-    .handle();
+  letOnceLock! { let TARGET_NAME = String::from(targetName) }.handle();
 
   status!("Initialising services");
   let ktServices = initServices(&target.services).handle();
@@ -213,7 +239,7 @@ use kickit::{status, console::Colour, stall,
   setupRunFs(&target.services, target.debugDump).handle();
 
   // Open our sockets
-  socks!(socket::Core, socket::Log);
+  socks!(socket::Core, socket::Log, socket::Power);
 
   // If we are running alongside another init these things should've already been done
   if (!noInit)
@@ -229,6 +255,10 @@ use kickit::{status, console::Colour, stall,
 
   // Startup our services & wait for it to finish
   startServices(ktServices).handle();
+
+  letOnceLock! { let UP_SERVICES = target.services }.handle();
+
+  tokio::task::spawn(async move { watchPowerLevel() });
 
   thread::sleep(Duration::new(u64::MAX, 0));
 }
