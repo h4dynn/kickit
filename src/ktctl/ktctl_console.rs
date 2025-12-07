@@ -52,7 +52,7 @@ pub trait ConvKTCtlError: Sized
 
 macro_rules! innerFatal
 {
-  (@traceless $message: expr) =>
+  ($message: expr) =>
   {
     use std::process;
 
@@ -81,8 +81,7 @@ macro_rules! innerFatal
 
 impl ReturnError for KTCtlError
 {
-  fn fatal(self) -> ! { innerFatal!(@traceless self.to_string()); }
-
+  fn fatal(self) -> ! { innerFatal!(self.to_string()); }
   fn warn(self) { warn!("{}", self.to_string()); }
 }
 

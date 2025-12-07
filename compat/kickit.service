@@ -1,0 +1,10 @@
+[Unit]
+Description=kickit
+
+[Service]
+Type=simple
+Restart=never
+ExecStart=/usr/lib/kickit/kickit --no-init
+
+[Install]
+WantedBy=multi-user.target

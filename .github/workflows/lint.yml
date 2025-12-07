@@ -1,4 +1,4 @@
-name: Clippy Lint
+name: Lint (clippy + shellcheck)
 
 on: [push, workflow_dispatch]
 
@@ -12,6 +12,11 @@ jobs:
       - name: Get rust toolkit
         run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | bash -s -- -y
 
+      - name: Install shellcheck
+        run: |
+          sudo apt update
+          sudo apt install -y shellcheck
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -21,3 +26,11 @@ jobs:
         run: |
           # Basically make clippy the most annoying it can be
           cargo clippy -- -W clippy::pedantic -W clippy::all -D warnings
+
+      - name: Run shellcheck
+        run: |
+          for sh in ./scripts/*.sh
+          do {
+            shellcheck "${sh}"
+          }
+          done

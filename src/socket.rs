@@ -1,24 +1,61 @@
 //! Sockets for the runfs
 
-use std::{os::unix::net::UnixStream, io::{Read, Write}};
-use crate::{Data, init::init_console::{KTErrorTrace, KTError, ConvKTError}, console::HandleKTError};
+use std::{os::unix::net::UnixStream as Stream, io::{Read, Write}, path::PathBuf};
+use crate::{Data, init::init_console::{KTErrorTrace, KTError, KTErrorResult}, console::HandleKTError};
+
+#[macro_export] macro_rules! socket_struct
+{
+  { $(pub $name: ident),* } =>
+  {
+    $(
+      #[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
+      pub struct $name;
+    )*
+  };
+}
+pub use crate::socket_struct as socket_struct;
+
+/*
+ * Provide a failure byte to the socket peer as a signal that something
+ * went wrong (this byte is usually 0x0f), shutdown the connection &
+ * then return
+ */
+#[macro_export] macro_rules! fail
+{
+  ($stream: expr, Default) =>
+  {
+    // The default failure byte is 0x0f
+    $crate::socket::fail!($stream, 0x0f);
+  };
+  ($stream: expr, $byte: tt) =>
+  {
+    // Write our "error byte" to signal to peer an error has occurred
+    $stream.write_all(&[$byte]).trace(KTError::Socket).or_warn();
+    // Cleanup stream for both input & output
+    Self::shutdown($stream).or_warn();
+    // Exit our function- do nothing more here
+    return
+  };
+}
+pub use crate::fail as fail;
 
 // The sockets- all of these will have KTSocket implemented
-#[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
-pub struct Core;
-#[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
-pub struct Log;
-#[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
-pub struct Power;
+socket_struct! { pub Core, pub Log, pub Power }
 
-// Accessing data from a UnixStream is tricky so this trait does it for us
-pub trait StreamBytes: From<UnixStream> + Read
+// Accessing data from a Stream is tricky so this trait does it for us
+pub trait StreamBytes: Into<Stream> + Read
 {
   /*
    * Get <len> amount of bytes from a stream, this will loop forever
    * until the bytes are successfully read or timeout is reached
    */
   fn stream_bytes(&mut self, len: usize) -> Data;
+  /*
+   * Collect an indefinite amount of bytes until an end-of-line (\n)
+   * is provided in the stream, note this will return None if just
+   * a newline is provided and no other bytes
+   */
+  fn stream_bytes_eol(&mut self) -> Option<Data>;
 }
 
 // Limit by the static lifetime because Tokio spawning requires this
@@ -29,10 +66,13 @@ pub trait KTSocket
    * The name we will use for the socket in runfs, which will end up
    * being /run/kickit/io.<SOCK_NAME>
    */
-  const NAME: &'static str;
+  fn name(&self) -> String;
 
-  // The socket permissions, default is 0o600 (only root can read/write)
-  const OCTAL_PERMS: u32 = 0o600;
+  // Make the socket root-access only (mapped to private dir)
+  const PRIVATE: bool = true;
+
+  // Add an option for a custom path to place the socket in
+  fn path(&self) -> Option<PathBuf> { None }
 
   /*
    * (note): The handler should be completely errorless, since we don't
@@ -44,14 +84,14 @@ pub trait KTSocket
    * because the compiler suggests to use it so others can use
    * auto-traits if needed (lint: `async_fn_in_trait`)
    */
-  fn handler(stream: UnixStream) -> impl Future<Output = ()> + Send;
+  fn handler(&'static self, stream: Stream) -> impl Future<Output = ()> + Send;
 
-  ///
-  /// # Errors
-  ///
-  /// * Failed to shutdown the stream for whatever reason
-  ///
-  fn shutdown(stream: UnixStream) -> Result<(), KTErrorTrace>
+  /**
+    * # Errors
+    *
+    * - Failed to shutdown the stream for whatever reason
+    */
+  fn shutdown(stream: Stream) -> Result<(), KTErrorTrace>
   {
     use std::net;
     stream.shutdown(net::Shutdown::Both).trace(KTError::Socket)
@@ -63,38 +103,49 @@ pub trait KTSocket
  * implementation as this keeps the implementation universal
  * and stops custom implementations
  */
-pub trait Start: KTSocket + 'static
+pub trait Start: KTSocket + Sync + 'static
 {
-  fn start(&self) -> impl Future<Output = Result<(), KTErrorTrace>> + Send
+  fn start(&'static self) -> impl Future<Output = Result<(), KTErrorTrace>> + Send
   {
     async move
     {
-      use std::{os::unix::{net::UnixListener, fs::PermissionsExt}, fs, fs::Permissions};
-      use tokio::runtime::Runtime;
+      use std::{os::unix::{net::UnixListener as Listener, fs::PermissionsExt},
+                fs::{Permissions, set_permissions}};
+
+      use tokio::task;
+      use crate::file_path;
 
       // The socket gets mapped to a matching path with its real name field
-      let path = &format!("/run/kickit/io.{}", Self::NAME) as &str;
+      let path = if let Some(__path) = self.path()
+      {
+        __path
+      }
+      // These are the default paths, used except for when a custom method is defined
+      else if (Self::PRIVATE)
+      {
+        file_path!(PathBuf::from("/run/kickit/private"), "io", self.name())
+      }
+      else
+      {
+        file_path!(PathBuf::from("/run/kickit"), "io", self.name())
+      };
 
       // Bind (start) our socket here
-      let sock = UnixListener::bind(path).context_trace(path, KTError::RunFsFail)?;
+      let sock = Listener::bind(&path).context_trace(path.display(), KTError::RunFsFail)?;
 
       /*
        * thanks <https://users.rust-lang.org/t/how-to-manage-permissions-of-a-unixlistener/31039/8>
        * for having an answer for this it really hurt my head
        */
-      fs::set_permissions(path, Permissions::from_mode(Self::OCTAL_PERMS))
-        .context_trace(path, KTError::RunFsFail)?;
-
-      // Our runtime for the sockets- should never be dropped
-      let runner = Runtime::new()
-                    .context_trace("Failed to start async runtime", KTError::Socket)?;
+      set_permissions(&path, Permissions::from_mode(if (Self::PRIVATE) { 0o600 } else { 0o666 }))
+          .context_trace(path.display(), KTError::RunFsFail)?;
 
       for peer in (sock.incoming())
       {
         match (peer)
         {
           // Run the handler once a valid peer is found
-          Ok(stream) => { runner.spawn(Self::handler(stream)); },
+          Ok(stream) => { task::spawn(self.handler(stream)); },
           // Usually this just means there are no more streams to read
           Err(..) => break
         }
@@ -105,7 +156,7 @@ pub trait Start: KTSocket + 'static
 }
 
 // Blanket implementation
-impl<S: KTSocket + 'static> Start for S {}
+impl<S: KTSocket + Sync + 'static> Start for S {}
 
 /*
  * The bytes that we use for input requeats for the socket, we do
@@ -122,6 +173,7 @@ impl Core
 
 impl Log
 {
+  // The init master log
   pub const MASTER: u8 = 0x6C;
 }
 
@@ -131,7 +183,7 @@ impl Power
   pub const REBOOT: u8 = 0x7E;
 }
 
-impl StreamBytes for UnixStream
+impl StreamBytes for Stream
 {
   fn stream_bytes(&mut self, len: usize) -> Data
   {
@@ -140,9 +192,28 @@ impl StreamBytes for UnixStream
 
     loop {
       // Wait until <len> bytes appear in the stream & can be read
-      if let Ok(r) = self.take(len as u64).read_to_end(&mut bytes) && (r == len)
+      if (self.take(len as u64).read_to_end(&mut bytes).ok() == Some(len))
       {
         return bytes
+      }
+    }
+  }
+
+  fn stream_bytes_eol(&mut self) -> Option<Data>
+  {
+    let mut currentByte: [u8; 1] = [0; 1];
+    let mut bytes = Data::new();
+
+    loop {
+      if (self.take(1).read_exact(&mut currentByte).is_ok())
+      {
+        // If we reach a newline or end-of-line, we can return the data we already read
+        if (currentByte[0] == b'\n')
+        {
+          return Some(bytes)
+        }
+        // Add the byte we just read to our collection of bytes
+        bytes.push(currentByte[0]);
       }
     }
   }
@@ -150,32 +221,21 @@ impl StreamBytes for UnixStream
 
 impl KTSocket for Core
 {
-  const NAME: &'static str = "Core";
-  // These permissions dictate that any user can read/write, but not execute
-  const OCTAL_PERMS: u32 = 0o666;
+  fn name(&self) -> String { String::from("Core") }
+  // All users should be able to access this socket as it reports no private data
+  const PRIVATE: bool = false;
 
-  async fn handler(mut stream: UnixStream)
+  async fn handler(&self, mut stream: Stream)
   {
     use crate::{state::state, init::target::TARGET_NAME};
     use std::process;
 
-    macro_rules! fail
+    match (stream.stream_bytes(1).as_slice())
     {
-      () =>
-      {
-        stream.write_all(&[0x0f]).trace(KTError::Socket).or_warn();
-        // Cleanup stream for both input & output
-        Self::shutdown(stream).or_warn();
-        return
-      }
-    }
-
-    match (stream.stream_bytes(1)[0])
-    {
-      Self::STATE => stream.write_all(&[state!() as u8]),
+      [Self::STATE] => stream.write_all(&[state!() as u8]),
       // Add a newline byte, this is our EOL
-      Self::VERSION => stream.write_all(&[crate::VERSION.to_string().as_bytes(), b"\n"].concat()),
-      Self::TARGET =>
+      [Self::VERSION] => stream.write_all(&[crate::VERSION.to_string().as_bytes(), b"\n"].concat()),
+      [Self::TARGET] =>
       {
         // Try open the OnceLock here
         if let Some(targetName) = TARGET_NAME.get()
@@ -184,14 +244,14 @@ impl KTSocket for Core
         }
         else {
           // Error if target name cannot be reached for whatever reason
-          fail!();
+          fail!(stream, Default);
         }
       },
-      Self::PID => stream.write_all(&process::id().to_be_bytes()),
+      [Self::PID] => stream.write_all(&process::id().to_be_bytes()),
       // Safely ignore newlines
-      b'\n' => Ok(()),
+      [b'\n'] => Ok(()),
       // Send an error for unknown bytes
-      _ => { fail!(); }
+      _ => { fail!(stream, Default); }
     }
       .trace(KTError::Socket).or_warn();
 
@@ -202,9 +262,9 @@ impl KTSocket for Core
 
 impl KTSocket for Log
 {
-  const NAME: &'static str = "Log";
+  fn name(&self) -> String { String::from("Log") }
 
-  async fn handler(mut stream: UnixStream)
+  async fn handler(&self, mut stream: Stream)
   {
     use crate::init::init_console::MASTER_LOG;
 
@@ -225,16 +285,16 @@ impl KTSocket for Log
 
 impl KTSocket for Power
 {
-  const NAME: &'static str = "Power";
+  fn name(&self) -> String { String::from("Power") }
 
-  async fn handler(mut stream: UnixStream)
+  async fn handler(&self, mut stream: Stream)
   {
     use crate::{console::Colour, init::{POWER_LEVEL, PowerLevel, init_console::warn}};
 
     /*
-     * None of these errors (OnceLock<u8>::set) carry any error
-     * information- so we can just check it succeeded &
-     * throw a generic error if not (in `.map_err(|_|)`)
+     * None of these errors (OnceLock<T>::set) carry any remotely useful
+     * error information- so we can just check it succeeded & throw a
+     * generic error if not (via `.map_err(|_|)`)
      */
     if let Err(reason) = match (stream.stream_bytes(1)[0])
     {
@@ -246,8 +306,9 @@ impl KTSocket for Power
 
       // Write error byte to socket- unexpected input
       _ => stream.write_all(&[0x0f]).map_err(|e| e.to_string())
+    } {
+      warn!("io.Power: Internal socket error: {reason}");
     }
-    { warn!("io.Power: Internal socket error: {reason}") }
 
     // This might not execute because init will start shutdown at this point
     Self::shutdown(stream).or_warn();

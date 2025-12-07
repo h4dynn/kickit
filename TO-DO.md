@@ -15,7 +15,7 @@
 
 - [ ] Add option to restart services
 
-- [ ] Implement way to access init master log
+- [x] Implement way to access init master log
 
 - [ ] Improve slightly messy/clumsy code
 

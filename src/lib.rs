@@ -8,26 +8,34 @@
 extern crate zstd;
 extern crate thiserror;
 
-use std::{fmt, fmt::Display, num::ParseIntError};
-use crate::Release::Unstable;
-
 pub mod init;
 pub mod ktctl;
 pub mod console;
 pub mod state;
 pub mod socket;
 
+use std::{fmt, fmt::Display, num::ParseIntError};
+
 #[derive(Eq, PartialEq, Copy, Clone, Debug, Default)]
 pub enum Release { Stable, Testing, #[default] Unstable }
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug, Default)]
-pub struct Version(u8, u8, u8);
+pub struct Version(u8, u8, u8, u8);
 
+/*
+ * This alias makes things alot less repetative, e.g.:
+ *
+ * `let myVeryImportByteData: Vec<u8> = Vec::new();`
+ *
+ * just becomes:
+ *
+ * `let myVeryImportByteData = Data::new();`
+ */
 pub type Data = Vec<u8>;
 
-pub const RELEASE: Release = Unstable;
-// Version is formatted as [Top].[Rel].[Lower]
-pub const VERSION: Version = Version(0, 1, 1);
+pub const RELEASE: Release = Release::Unstable;
+// Version is formatted as [Top].[Rel].[Lower]-[Increment]
+pub const VERSION: Version = Version(0, 1, 1, 2);
 // Where the important files for kickit live
 pub const PREFIX: &str = "/usr/lib/kickit";
 
@@ -37,15 +45,15 @@ impl Display for Version
 {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
   {
-    write!(f, "{}.{}.{}", self.0, self.1, self.2)
+    write!(f, "{}.{}.{}-{}", self.0, self.1, self.2, self.3)
   }
 }
 
-///
-/// # Errors
-///
-/// * Couldn't convert input substring to a byte because it isn't valid hex
-///
+/**
+  * # Errors
+  *
+  * - Couldn't convert input substring (radix) to a byte because it isn't valid hex
+  */
 /*
  * Convert a string of hex to a vector of bytes, for example:
  *
@@ -57,48 +65,43 @@ impl Display for Version
  *   assert_eq!(*hex_data("377abcaf271c").unwrap(), [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]);
  * ```
  */
-#[inline] pub fn hex_data(h: impl Display) -> Result<Data, ParseIntError>
+#[inline] pub fn hex_data<Stringify: Display>(hexRaw: Stringify) -> Result<Data, ParseIntError>
 {
   // Open a string on our hex data so we can get a slice of chars from it
-  let hex = h.to_string();
+  let hex = hexRaw.to_string();
   // The data vector will be increased for each hex
   let mut data = Data::with_capacity(hex.len() / 2);
 
   /*
-   * I know this is a messy way to do this but its better than
-   * using 'str::from_utf8()' since we don't `.unwrap()` here
+   * Convert from a String to a vector of characters & then
+   * split that into character chunks of 2
    */
-  for single in (hex.as_bytes().chunks(2)
-                    .map(|chunk| { let mut out = String::new();
-                                    for c in (chunk) { out.push(*c as char) }
-                                    out }))
+  for single in (hex.chars().collect::<Vec<char>>().chunks(2))
   {
-    data.push(u8::from_str_radix(&single as &str, 16)?);
+    // Collect the 2 characters as a String
+    data.push(u8::from_str_radix(&single.iter().collect::<String>() as &str, 16)?);
   }
 
   Ok(data)
 }
 
-#[must_use] pub fn version() -> String
-{
-  use crate::Release::Stable;
+pub const PRETTY_VERSION: fn() -> String = ||
+[
+  // Display version as a string
+  crate::VERSION.to_string(),
 
-  [
-    // Display version as a string
-    crate::VERSION.to_string(),
-
+  if (crate::RELEASE == crate::Release::Stable)
+  {
+    // Nothing needs to be added here
+    String::new()
+  }
+  else {
     // Add the current release at the end if unstable
-    if (crate::RELEASE == Stable)
-    {
-      String::new()
-    }
-    else {
-      format!(" ({})", crate::RELEASE)
-    }
-  ]
-    // And join both of those together without a seperator
-    .join("")
-}
+    format!(" ({})", crate::RELEASE)
+  }
+]
+  // And join both of those together without a seperator
+  .join("");
 
 // Get the name of the current binary (e.g. ktctl)
 #[macro_export] macro_rules! binary
@@ -106,18 +109,15 @@ impl Display for Version
   () =>
   {
     {
-      use std::{env, ffi::OsStr};
-
-      env::current_exe()
+      std::env::current_exe()
         .unwrap_or(env!("CARGO_PKG_NAME").into())
         .file_name()
-        .unwrap_or(OsStr::new(env!("CARGO_PKG_NAME")))
+        .unwrap_or(std::ffi::OsStr::new(env!("CARGO_PKG_NAME")))
         .display()
         .to_string()
     }
   };
 }
-
 // Implement std::fmt::Display for enumeration in a nicely formatted way
 #[macro_export] macro_rules! display_enum
 {
@@ -157,7 +157,23 @@ impl Display for Version
       }
     })*
   };
-
+  /*
+   * Display a variant as its name, for example:
+   *
+   * ```
+   *   use crate::display_enum;
+   *
+   *   #[derive(Debug)] enum Mood { Happy, Sad, Angry }
+   *
+   *   // Each variant will be displayed as their name
+   *   display_enum! { Mood }
+   *
+   *   fn main()
+   *   {
+   *     eprintln!("Today I am feeling {}", Mood::Happy);
+   *   }
+   * ```
+   */
   { $($what: ty),* } =>
   {
     $(impl std::fmt::Display for $what
@@ -172,7 +188,6 @@ impl Display for Version
       }
     })*
   };
-
   /*
    * Display a variant as its representing value, for example:
    *
@@ -202,7 +217,6 @@ impl Display for Version
     })*
   };
 }
-
 /*
  * Concatenate multiple files/directories together into a PathBuf, for example:
  *
@@ -225,16 +239,12 @@ impl Display for Version
   ($($sub: expr),*) =>
   {
     {
-      use std::path::PathBuf;
-      let mut tempPath = PathBuf::new();
-
+      let mut tempPath = std::path::PathBuf::new();
       $(tempPath.push($sub);)*
-
       tempPath
     }
   };
 }
-
 /*
  * Create a file PathBuf which ends in an extension, for example:
  *
@@ -254,24 +264,28 @@ impl Display for Version
   ($parent: expr, $file: expr, $ext: expr) =>
   {
     {
-      use std::path::PathBuf;
-      let mut tempPath = PathBuf::from($parent);
-
-      tempPath.push($file);
-      tempPath.with_extension($ext)
+      $crate::path!($parent, $file).with_extension($ext)
     }
   };
 }
-
-// Simple way of returning if a condition equates to true
-#[macro_export] macro_rules! returnif
-{
-  ($condition: expr) => { if ($condition) { return } };
-  ($condition: expr, $val: path) => { if ($condition) { return $val } };
-}
-
-#[macro_export]
-macro_rules! letOnceLock
+/*
+ * A macro for the absolute boilerplate that is setting a OnceLock, usage example:
+ *
+ * ```
+ *   use std::sync::OnceLock;
+ *   use nix::unistd::getuid;
+ *   use crate::{letOnceLock, console::HandleKTError};
+ *
+ *   const USER_ID: OnceLock<u32> = OnceLock::new();
+ *
+ *   fn main()
+ *   {
+ *     letOnceLock! { let USER_ID = getuid() }.handle();
+ *     eprintln!("your user's ID is: {}", USER_ID.get().unwrap());
+ *   }
+ * ```
+ */
+#[macro_export] macro_rules! letOnceLock
 {
   { let $oncelock: path = $val: expr } =>
   {

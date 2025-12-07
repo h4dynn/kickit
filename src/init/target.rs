@@ -5,27 +5,38 @@ use crate::{init::init_console::KTErrorTrace, path, file_path};
 
 // KTTargetSource is used for toml::from_str
 #[derive(serde::Deserialize, PartialEq, Eq, Clone, Debug)]
-struct KTTargetSource { pub services: Option<Vec<String>>, pub log_level: Option<u8>,
-                        pub hostname: Option<String>, pub debug_dump: Option<bool> }
+struct KTTargetSource
+{
+  pub services: Option<Vec<String>>,
+  pub log_level: Option<u8>,
+  pub hostname: Option<String>,
+  pub debug_dump: Option<bool>
+}
 
 // The final returned target
 #[derive(PartialEq, Eq, Clone, Debug, Default)]
-pub struct KTTarget { pub name: String, pub services: Vec<String>,
-                      pub logLevel: u8, pub hostname: String,
-                      pub debugDump: bool }
+pub struct KTTarget
+{
+  pub name: String,
+  pub services: Vec<String>,
+  pub logLevel: u8,
+  pub hostname: String,
+  pub debugDump: bool
+}
 
 // This gets a value when the target is sourced
 pub static TARGET_NAME: OnceLock<String> = OnceLock::new();
 
-///
-/// # Errors
-/// * The matching configuration file for the target doesn't exist,
-/// * The configuration file couldn't be parsed (usually for bad syntax),
-/// * No services were provided in the configuration
-///
+/**
+  * # Errors
+  *
+  * - The matching configuration file for the target doesn't exist,
+  * - The configuration file couldn't be parsed (usually for bad syntax),
+  * - No services were provided in the configuration
+ **/
 pub fn source(name: String) -> Result<KTTarget, KTErrorTrace>
 {
-  use crate::{init::init_console::{KTError, KTErrorTrace, ConvKTError}};
+  use crate::{init::init_console::{KTError, KTErrorTrace, KTErrorResult}};
   use std::fs;
 
   // Read toml contents from target config to string

@@ -96,15 +96,16 @@ pub use crate::mountflags as mountflags;
 }
 pub use crate::mountopts as mountopts;
 
+/**
+  * # Errors
+  *
+  * - Couldn't mount the device (`nix::mount::mount()` gives more info)
+ **/
 // Frontend for nix library's mount function
-///
-/// # Errors
-/// * Couldn't mount the device (`nix::mount::mount()` gives more info)
-///
 pub fn mount(from: &str, to: &str, fsType: &str, flags: MountFlags, opts: &MountOptions)
   -> Result<(), crate::init::init_console::KTErrorTrace>
 {
-  use crate::init::init_console::{KTError, ConvKTError};
+  use crate::init::init_console::{KTError, KTErrorResult};
 
   nix::mount::mount(Some(from), to, Some(fsType), flags.into(), Some(&*opts.to_string()))
     .trace(KTError::SysFsMount)?;
@@ -112,28 +113,30 @@ pub fn mount(from: &str, to: &str, fsType: &str, flags: MountFlags, opts: &Mount
   Ok(())
 }
 
-///
-/// # Errors
-/// * Couldn't unmount the device
-///
+/**
+  * # Errors
+  *
+  * - Couldn't unmount the device
+ **/
 pub fn unmount(dest: &str) -> Result<(), crate::init::init_console::KTErrorTrace>
 {
-  use crate::init::init_console::{KTError, ConvKTError};
+  use crate::init::init_console::{KTError, KTErrorResult};
 
   nix::mount::umount(dest).trace(KTError::SysFsUnmount)?;
   Ok(())
 }
 
-///
-/// # Errors
-/// * Couldn't read from /proc/mounts
-///
-/// Check if a path is a mountpoint
+/**
+  * # Errors
+  *
+  * - Couldn't read from /proc/mounts
+ **/
+// Check if a path is a mountpoint
 pub fn mounted<P: AsRef<std::path::Path> + std::fmt::Display>(mountpoint: P)
   -> Result<bool, crate::init::init_console::KTErrorTrace>
 {
   use std::fs;
-  use crate::init::init_console::{KTError, ConvKTError};
+  use crate::init::init_console::{KTError, KTErrorResult};
 
   // Cycle through potential matches from /proc/mounts
   for candMount in (fs::read_to_string("/proc/mounts").trace(KTError::FileNotFound)?.split('\n'))

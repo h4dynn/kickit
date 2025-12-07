@@ -4,24 +4,28 @@
 #![allow(non_snake_case)]
 
 use std::{fs, fs::File, io::Write, path::PathBuf, process};
-use nix::unistd::getuid as uid;
+use nix::unistd::getuid;
+use tokio::task;
 use kickit::{console::Colour, console::{ReturnError, HandleKTError},
-             init::{init_console::{KTError, KTErrorTrace, ConvKTError, status, stall},
-                    service::Service, UP_SERVICES}, letOnceLock};
+             init::{init_console::{KTError, KTErrorTrace, KTErrorResult, status, stall},
+                    service::{Service, SERVICE_HANDLES}, UP_SERVICES}, letOnceLock};
 
-///
-/// # Errors:
-/// * if /run/kickit exists (kickit is already running),
-/// * if not ran as root user,
-/// * if not ran as the init process (pid 1)
-///
+/**
+  * # Errors
+  *
+  * - if /run/kickit exists (kickit is already running),
+  * - if not ran as root user,
+  * - if not ran as the init process (pid 1)
+ **/
 #[inline] fn sanity(sideInit: bool) -> Result<(), KTError>
 {
   use kickit::{console::affirm, init::init_console::warn};
+
   // If /run/kickit is already there then another kickit is running
   affirm!(fs::metadata("/run/kickit").is_err(), KTError::AlreadyRunning);
 
-  affirm!(uid().is_root(), KTError::NotRoot);
+  // Make sure we are running as the root user
+  affirm!(getuid().is_root(), KTError::NotRoot);
 
   if (!sideInit)
   {
@@ -54,16 +58,12 @@ use kickit::{console::Colour, console::{ReturnError, HandleKTError},
 #[inline] fn setupRunFs(services: &Vec<String>, debugDump: bool) -> Result<(), KTErrorTrace>
 {
   use std::{fs::Permissions, os::unix::fs::{symlink, PermissionsExt}};
-  use kickit::{path, hex_data};
-
-  // An empty zstd file, in hex bytes, created from /dev/null (`$ zstd -1c < /dev/null | xxd`)
-  let EMPTY_ZSTD = hex_data("28b52ffd240001000099e9d851").unwrap();
+  use kickit::path;
 
   if !(cfg!(debug_assertions) || debugDump)
   {
     // Normal behaviour - create runfs as a folder
     fs::create_dir("/run/kickit").trace(KTError::RunFsFail)?;
-    fs::create_dir("/run/kickit/service").trace(KTError::RunFsFail)?;
   }
   // A debug dump will create a folder in /var/log/kickit and symlink it to the runfs
   else if (debugDump)
@@ -82,23 +82,18 @@ use kickit::{console::Colour, console::{ReturnError, HandleKTError},
     // Create a symlink so it acts as if it is a directory
     //symlink(dumpDir, PathBuf::from("/run/kickit")).trace(KTError::RunFsFail)?;
     symlink(dumpDir, PathBuf::from("/run/kickit")).trace(KTError::RunFsFail)?;
-
-    fs::create_dir(PathBuf::from("/run/kickit/service")).trace(KTError::RunFsFail)?;
   }
+
+  fs::create_dir("/run/kickit/service").trace(KTError::RunFsFail)?;
+  fs::create_dir("/run/kickit/private").trace(KTError::RunFsFail)?;
+
+  // Make the private folder, well, private
+  fs::set_permissions("/run/kickit/private", Permissions::from_mode(0o600))
+    .trace(KTError::RunFsFail)?;
 
   for upService in (services)
   {
-    let mainDir = path!("/run/kickit/service", upService);
-    let log = path!("/run/kickit/service", upService, "log");
-
-    fs::create_dir(&mainDir).trace(KTError::RunFsFail)?;
-
-    let mut logFile = File::create(&log).trace(KTError::RunFsFail)?;
-
-    // Set permissions so that only root can access the logfile
-    logFile.set_permissions(Permissions::from_mode(0o100_600)).trace(KTError::RunFsFail)?;
-    // Setup empty ZSTD file (just the header)
-    logFile.write_all(EMPTY_ZSTD.as_slice()).trace(KTError::RunFsFail)?;
+    fs::create_dir(path!("/run/kickit/service", upService)).trace(KTError::RunFsFail)?;
   }
 
   Ok(())
@@ -140,27 +135,27 @@ use kickit::{console::Colour, console::{ReturnError, HandleKTError},
   Ok(initServices)
 }
 
-#[inline] fn startServices(services: Vec<Service>) -> Result<(), KTErrorTrace>
+#[inline] fn startService(mut service: Service) -> Result<(), KTErrorTrace>
 {
   use kickit::{init::service::Pattern::Standard, state};
 
-  for mut upService in (services)
+  status!("Starting service: {}", service.name);
+
+  // Don't continue starting services if we are stalled
+  if (!state!().is_ok())
   {
-    status!("Starting service: {}", upService.name);
+    stall!();
+  }
 
-    // Don't continue starting services if we are stalled
-    if (!state!().is_ok()) { stall!(); }
-
-    if let Err(trace) = upService.up()
-    {
-      // If this service is optional we only need to warn not abort
-      if (upService.optional) { trace.warn(); } else { return Err(trace) }
-    }
-    else if (upService.pattern == Standard)
-    {
-      // Spawn the service watcher on another thread
-      tokio::task::spawn(async move { upService.watch().handle() });
-    }
+  if let Err(trace) = service.up()
+  {
+    // If this service is optional we only need to warn not abort
+    if (service.optional) { trace.warn(); } else { return Err(trace) }
+  }
+  else if (service.pattern == Standard)
+  {
+    // Spawn the service watcher on another thread
+    task::spawn(async move { service.watch().handle() });
   }
 
   Ok(())
@@ -201,21 +196,32 @@ fn watchPowerLevel() -> !
 
 macro_rules! socks
 {
-  ($($sock: path),*) => { $(tokio::task::spawn(async move { $sock.start().await.handle(); });)* };
+  ($($sock: path),*) =>
+  {
+    {
+      $(
+        tokio::task::spawn(async move
+        {
+          $sock.start().await.handle();
+        });
+      )*
+    }
+  };
 }
 
 #[tokio::main] async fn main()
 {
-  use kickit::{init::{target, target::TARGET_NAME, cmdlineParam}, socket, socket::Start};
   use std::{thread, time::Duration, env};
+
+  use kickit::{init::{target, target::TARGET_NAME, cmdlineParam, service}, socket, socket::Start};
 
   let sysArgs: Vec<String> = env::args().collect();
   // Run alongside another init e.g. openrc or runit
-  let noInit = sysArgs.len() > 1 && &sysArgs[1] as &str == "--no-init";
+  let noInit = (sysArgs.len() > 1 && &sysArgs[1] as &str == "--no-init");
 
   sanity(noInit).handle();
 
-  status!("kickit {}", kickit::version());
+  status!("kickit {}", kickit::PRETTY_VERSION());
 
   let targetName = if (cfg!(debug_assertions))
   {
@@ -235,11 +241,11 @@ macro_rules! socks
   status!("Initialising services");
   let ktServices = initServices(&target.services).handle();
 
-  status!("Setting up work directory");
-  setupRunFs(&target.services, target.debugDump).handle();
-
-  // Open our sockets
-  socks!(socket::Core, socket::Log, socket::Power);
+  letOnceLock!
+  {
+    let SERVICE_HANDLES = ktServices.iter().map(std::convert::Into::into).collect()
+  }
+    .handle();
 
   // If we are running alongside another init these things should've already been done
   if (!noInit)
@@ -253,8 +259,17 @@ macro_rules! socks
     hostname.write_all(target.hostname.as_bytes()).trace(KTError::Unknown).handle();
   }
 
+  status!("Setting up work directory");
+  setupRunFs(&target.services, target.debugDump).handle();
+
+  // Open our sockets
+  socks!(socket::Core, socket::Log, socket::Power, service::Socket);
+
   // Startup our services & wait for it to finish
-  startServices(ktServices).handle();
+  for service in (ktServices)
+  {
+    startService(service).handle();
+  }
 
   letOnceLock! { let UP_SERVICES = target.services }.handle();
 

@@ -2,13 +2,20 @@
 
 use std::{sync::Mutex, fmt::Display};
 use thiserror::Error;
-use crate::{console::Colour, console::ReturnError, state::InitState};
+use crate::{console::Colour, console::ReturnError, state::InitState, display_enum};
 
-// The marker for each of these display types
-pub const STATUS: &str = "\x1b[1m[*]\x1b[0m";
-pub const WARN: &str = "\x1b[1;33m[-]\x1b[0m";
-pub const FATAL: &str = "\x1b[1;31m[!]\x1b[0m";
-pub const SERVICE: &str = "\x1b[1;92m[>]\x1b[0m";
+pub enum Marker { Status, Warn, Fatal, Service }
+
+display_enum!
+{
+  Marker
+  {
+    Status => "\x1b[1m[*]\x1b[0m",
+    Warn => "\x1b[1;33m[-]\x1b[0m",
+    Fatal => "\x1b[1;31m[!]\x1b[0m",
+    Service => "\x1b[1;92m[>]\x1b[0m"
+  }
+}
 
 /*
  * This is where our logs from things like `state!()`, `warn!()`
@@ -68,23 +75,22 @@ pub enum KTError
 #[must_use]
 pub struct KTErrorTrace { kind: KTError, context: Option<String>, trace: String }
 
-pub trait ConvKTError
+pub trait KTErrorResult<OkType, ErrType> where ErrType: Display
 {
-  type ErrType: Display;
-  type OkType;
-  /// Convert an error to a trace without context
-  ///
-  /// # Errors
-  /// * Data type contains an error (e.g. Result is not Ok(x) variant)
-  ///
-  fn trace(self, errorKind: KTError) -> KTResult<Self::OkType>;
-  /// Same but with context
-  ///
-  /// # Errors
-  /// * Data type contains an error (e.g. Result is not Ok(x) variant)
-  ///
-  fn context_trace(self, context: impl ToString, errorKind: KTError)
-    -> KTResult<Self::OkType>;
+  /**
+    * Convert an error to a trace without context
+    *
+    * # Errors
+    * - Data type contains an error (e.g. Result is not Ok(x) variant)
+   **/
+  fn trace(self, errorKind: KTError) -> KTResult<OkType>;
+  /**
+    * Same but with context
+    *
+    * # Errors
+    * - Data type contains an error (e.g. Result is not Ok(x) variant)
+   **/
+  fn context_trace(self, context: impl Display, errorKind: KTError) -> KTResult<OkType>;
 }
 
 // A traceless, unknown error is the default
@@ -95,21 +101,20 @@ macro_rules! innerFatal
   // Implementation for a tracless error, just displays the provided message
   (@traceless $error: tt) =>
   {
-    log!(format!("{}{} {}{}", $crate::init::init_console::FATAL, Colour::BOLD, $error,
+    log!(format!("{}{} {}{}", $crate::init::init_console::Marker::Fatal, Colour::BOLD, $error,
                 Colour::RESET));
 
     $error.exit();
   };
-
   (@trace $error: tt) =>
   {
-    log!(format!("{}{} {}{}{}", $crate::init::init_console::FATAL, Colour::BOLD, $error.kind,
-                  Colour::RESET,
+    log!(format!("{}{} {}{}{}", $crate::init::init_console::Marker::Fatal, Colour::BOLD,
+                  $error.kind, Colour::RESET,
                   if let Some(ref a) = $error.context { format!(": {a}") } else { String::new() }));
 
     if (!$error.trace.is_empty())
     {
-      log!(format!("{}{} >> {}", $crate::init::init_console::FATAL, Colour::RESET,
+      log!(format!("{}{} >> {}", $crate::init::init_console::Marker::Fatal, Colour::RESET,
                     $error.trace.trim_end_matches('\n')));
     }
 
@@ -145,10 +150,16 @@ impl ReturnError for KTErrorTrace
 }
 
 // Strip a traceful error down to a traceless error
-impl From<KTErrorTrace> for KTError { fn from(trace: KTErrorTrace) -> Self { trace.kind } }
+impl From<KTErrorTrace> for KTError
+{
+  fn from(trace: KTErrorTrace) -> Self { trace.kind }
+}
 
 // ...and vice versa
-impl From<KTError> for KTErrorTrace { fn from(kind: KTError) -> Self { Self::new(kind, "") } }
+impl From<KTError> for KTErrorTrace
+{
+  fn from(kind: KTError) -> Self { Self::new(kind, "") }
+}
 
 impl KTError
 {
@@ -168,43 +179,36 @@ impl KTError
 
 impl KTErrorTrace
 {
-  pub fn new(kind: KTError, t: &(impl ToString + ?Sized)) -> Self
+  pub fn new(k: KTError, t: &(impl ToString + ?Sized)) -> Self
   {
-    Self { kind, context: None, trace: t.to_string() }
+    Self { kind: k, context: None, trace: t.to_string() }
   }
 
-  pub fn with_context(kind: KTError, c: &(impl ToString + ?Sized), t: &(impl ToString + ?Sized))
+  pub fn with_context(k: KTError, c: &(impl ToString + ?Sized), t: &(impl ToString + ?Sized))
     -> Self
   {
-    Self { kind, context: Some(c.to_string()), trace: t.to_string() }
+    Self { kind: k, context: Some(c.to_string()), trace: t.to_string() }
   }
 }
 
-impl<S, F: Display> ConvKTError for Result<S, F>
+impl<OkType, ErrType: Display> KTErrorResult<OkType, ErrType> for Result<OkType, ErrType>
 {
-  type OkType = S;
-  type ErrType = F;
-
-  fn trace(self, errorKind: KTError) -> KTResult<Self::OkType>
+  fn trace(self, errorKind: KTError) -> KTResult<OkType>
   {
     self.map_err(|e| KTErrorTrace::new(errorKind, &e))
   }
 
-  fn context_trace(self, context: impl ToString, errorKind: KTError)
-    -> KTResult<Self::OkType>
+  fn context_trace(self, c: impl ToString, k: KTError) -> KTResult<OkType>
   {
-    self.map_err(|e| KTErrorTrace::with_context(errorKind, &context, &e))
+    self.map_err(|e| KTErrorTrace::with_context(k, &c, &e))
   }
 }
 
-impl<F: Display> ConvKTError for Option<F>
+impl<ErrType: Display> KTErrorResult<(), ErrType> for Option<ErrType>
 {
-  type OkType = ();
-  type ErrType = F;
-
-  fn trace(self, errorKind: KTError) -> KTResult<()>
+  fn trace(self, k: KTError) -> KTResult<()>
   {
-    if let Some(e) = self.map(|why| KTErrorTrace::new(errorKind, &why))
+    if let Some(e) = self.map(|why| KTErrorTrace::new(k, &why))
     {
       Err(e)
     }
@@ -213,9 +217,9 @@ impl<F: Display> ConvKTError for Option<F>
     }
   }
 
-  fn context_trace(self, context: impl ToString, errorKind: KTError) -> KTResult<()>
+  fn context_trace(self, c: impl Display, k: KTError) -> KTResult<()>
   {
-    if let Some(e) = self.map(|why| KTErrorTrace::with_context(errorKind, &context, &why))
+    if let Some(e) = self.map(|why| KTErrorTrace::with_context(k, &c, &why))
     {
       Err(e)
     }
@@ -225,35 +229,27 @@ impl<F: Display> ConvKTError for Option<F>
   }
 }
 
-impl ConvKTError for String
+impl KTErrorResult<(), String> for String
 {
-  type OkType = ();
-  type ErrType = Self;
-
-  fn trace(self, errorKind: KTError) -> KTResult<()>
+  fn trace(self, k: KTError) -> KTResult<()>
   {
-    Err(KTErrorTrace::new(errorKind, &self))
+    Err(KTErrorTrace::new(k, &self))
   }
-  fn context_trace(self, context: impl ToString, errorKind: KTError)
-    -> KTResult<Self::OkType>
+  fn context_trace(self, c: impl Display, k: KTError) -> KTResult<()>
   {
-    Err(KTErrorTrace::with_context(errorKind, &context, &self))
+    Err(KTErrorTrace::with_context(k, &c, &self))
   }
 }
 
-impl ConvKTError for std::io::Error
+impl KTErrorResult<(), std::io::Error> for std::io::Error
 {
-  type OkType = ();
-  type ErrType = Self;
-
-  fn trace(self, errorKind: KTError) -> KTResult<()>
+  fn trace(self, k: KTError) -> KTResult<()>
   {
-    Err(KTErrorTrace::new(errorKind, &self))
+    Err(KTErrorTrace::new(k, &self))
   }
-  fn context_trace(self, context: impl ToString, errorKind: KTError)
-    -> KTResult<Self::OkType>
+  fn context_trace(self, c: impl Display, k: KTError) -> KTResult<()>
   {
-    Err(KTErrorTrace::with_context(errorKind, &context, &self))
+    Err(KTErrorTrace::with_context(k, &c, &self))
   }
 }
 
@@ -316,12 +312,19 @@ pub use crate::log as log;
 }
 pub use crate::stall as stall;
 
+/*
+ * Print a message to the init's master log, e.g.:
+ *
+ * `status!("Hello world!");`
+ *
+ * Output: `[*] Hello world`
+ */
 #[macro_export] macro_rules! status
 {
   ($($message: tt)*) =>
   {
     {
-      $crate::init::init_console::log!(format!("{} {}", $crate::init::init_console::STATUS,
+      $crate::init::init_console::log!(format!("{} {}", $crate::init::init_console::Marker::Status,
                                         format!($($message)*)))
     }
   };
@@ -333,7 +336,8 @@ pub use crate::status as status;
   ($($message: tt)*) =>
   {
     {
-      $crate::init::init_console::log!(format!("{} {}{}{}", $crate::init::init_console::WARN,
+      $crate::init::init_console::log!(format!("{} {}{}{}",
+                                              $crate::init::init_console::Marker::Warn,
                                               Colour::BOLD, format!($($message)*), Colour::RESET))
     }
   };
