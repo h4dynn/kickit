@@ -3,8 +3,8 @@
 use crate::display_enum;
 
 /*
- * Implementation for throwing an error with a trace (KTErrorTrace) or
- * without a trace (KTError)
+ * Implementation for throwing an error with a trace (ErrorTrace) or
+ * without a trace (Error)
  */
 pub trait ReturnError
 {
@@ -13,7 +13,7 @@ pub trait ReturnError
   fn warn(self);
 }
 
-pub trait HandleKTError: Sized
+pub trait HandleError: Sized
 {
   type OkType;
   type ErrorType: ReturnError;
@@ -34,10 +34,10 @@ display_enum!
 }
 
 /*
- * What to do when a KTError is found
+ * What to do when a Error is found
  * Implemented for Result<anything, error> and Option<error>
  */
-impl<S, F: ReturnError> HandleKTError for Result<S, F>
+impl<S, F: ReturnError> HandleError for Result<S, F>
 {
   type OkType = S;
   type ErrorType = F;
@@ -47,7 +47,7 @@ impl<S, F: ReturnError> HandleKTError for Result<S, F>
 }
 
 // Assume here that the Option carries an error
-impl<F: ReturnError> HandleKTError for Option<F>
+impl<F: ReturnError> HandleError for Option<F>
 {
   type OkType = ();
   type ErrorType = F;

@@ -97,12 +97,12 @@ impl ReturnError for KTCtlErrorTrace
 
 impl KTCtlErrorTrace
 {
-  pub fn new(kind: KTCtlError, t: &(impl ToString + ?Sized)) -> Self
+  pub fn new(kind: KTCtlError, t: &(impl Display + ?Sized)) -> Self
   {
     Self { kind, context: None, trace: t.to_string() }
   }
 
-  pub fn with_context(kind: KTCtlError, c: &(impl ToString + ?Sized), t: &(impl ToString + ?Sized))
+  pub fn with_context(kind: KTCtlError, c: &(impl Display + ?Sized), t: &(impl Display + ?Sized))
     -> Self
   {
     Self { kind, context: Some(c.to_string()), trace: t.to_string() }
@@ -122,7 +122,7 @@ impl<S, F: std::fmt::Display> ConvKTCtlError for Result<S, F>
     }
   }
 
-  fn context_trace(self, context: impl ToString, errorKind: KTCtlError)
+  fn context_trace(self, context: impl Display, errorKind: KTCtlError)
     -> KTCtlResult<Self::OK>
   {
     match (self)
@@ -143,7 +143,7 @@ impl<S: std::fmt::Display> ConvKTCtlError for Option<S>
     Err(KTCtlErrorTrace::new(errorKind, ""))
   }
 
-  fn context_trace(self, context: impl ToString, errorKind: KTCtlError)
+  fn context_trace(self, context: impl Display, errorKind: KTCtlError)
     -> KTCtlResult<Self::OK>
   {
     if let Some(contents) = self { return Ok(contents) }

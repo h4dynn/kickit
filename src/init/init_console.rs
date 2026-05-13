@@ -1,10 +1,13 @@
 //! Error handling, warning & status implementations for the init process
 
-use std::{sync::Mutex, fmt::Display};
+use std::{sync::Mutex, fmt::Display, io};
 use thiserror::Error;
 use crate::{console::Colour, console::ReturnError, state::InitState, display_enum};
 
-pub enum Marker { Status, Warn, Fatal, Service }
+pub enum Marker
+{
+  Status, Warn, Fatal, Service
+}
 
 display_enum!
 {
@@ -25,20 +28,22 @@ display_enum!
 #[doc(hidden)]
 pub static MASTER_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-// Just a Result where the error type is of KTErrorTrace
-type KTResult<S> = Result<S, KTErrorTrace>;
+pub use std::result::Result as StdResult;
+// Just a Result where the error type is of ErrorTrace
+pub type Result<S> = StdResult<S, ErrorTrace>;
 
 /*
- * KTError stores all possible errors that could be thrown
+ * Error stores all possible errors that could be thrown
  * Messages and whether the error should send you to an emergency shell
  * or not are defined in the impl
  */
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Error, Default)]
 #[must_use]
-pub enum KTError
+pub enum Error
 {
-  // A generic error- usually for internal errors / bugs
-  #[error("An unknown error occurred")] #[default] Unknown,
+  // A generic error- usually for very specific case errors & impossible situations
+  #[default]
+  #[error("An unknown error occurred")] Unknown,
   // Errors when starting up the init system
   #[error("kickit is already running!")] AlreadyRunning,
   #[error("kickit must be ran as the init process")] NotInit,
@@ -56,10 +61,10 @@ pub enum KTError
   #[error("Failed to read from a socket")] Socket,
   // Service-related errors (used in `src/service.rs`)
   #[error("Failed to parse service configuration file")] ServiceParse,
-  #[error("Failed to access logs from service")] ServiceAccess,
+  #[error("Failed to access a service")] ServiceAccess,
   #[error("Failed to start a service")] ServiceUp,
   #[error("Failed to stop a service")] ServiceDown,
-  #[error("Failed to start a logger for a service")] ServiceLog,
+  #[error("Failed to start logger for a service")] ServiceLog,
   #[error("Service was killed or stopped")] ServiceNotRunning,
   #[error("Service became a zombie")] ServiceZombified,
   #[error("Failed to access a logfile")] AccessLog,
@@ -73,9 +78,14 @@ pub enum KTError
 // This stores an error (in kind) and an error trace/"context" (in trace)
 #[derive(PartialEq, Eq, Clone, Debug)]
 #[must_use]
-pub struct KTErrorTrace { kind: KTError, context: Option<String>, trace: String }
+pub struct ErrorTrace
+{
+  kind: Error,
+  context: Option<String>,
+  trace: String
+}
 
-pub trait KTErrorResult<OkType, ErrType> where ErrType: Display
+pub trait ErrorResult<OkType, ErrType> where ErrType: Display
 {
   /**
     * Convert an error to a trace without context
@@ -83,39 +93,45 @@ pub trait KTErrorResult<OkType, ErrType> where ErrType: Display
     * # Errors
     * - Data type contains an error (e.g. Result is not Ok(x) variant)
    **/
-  fn trace(self, errorKind: KTError) -> KTResult<OkType>;
+  fn trace(self, errorKind: Error) -> Result<OkType>;
   /**
     * Same but with context
     *
     * # Errors
     * - Data type contains an error (e.g. Result is not Ok(x) variant)
    **/
-  fn context_trace(self, context: impl Display, errorKind: KTError) -> KTResult<OkType>;
+  fn context_trace(self, context: impl Display, errorKind: Error) -> Result<OkType>;
 }
 
 // A traceless, unknown error is the default
-impl Default for KTErrorTrace { fn default() -> Self { KTErrorTrace::new(KTError::default(), "") } }
+impl Default for ErrorTrace
+{
+  fn default() -> Self
+  {
+    ErrorTrace::new(Error::default(), "")
+  }
+}
 
 macro_rules! innerFatal
 {
   // Implementation for a tracless error, just displays the provided message
   (@traceless $error: tt) =>
   {
-    log!(format!("{}{} {}{}", $crate::init::init_console::Marker::Fatal, Colour::BOLD, $error,
-                Colour::RESET));
+    use $crate::init::init_console::Marker::Fatal;
 
+    log!(format!("{}{} {}{}", Fatal, Colour::BOLD, $error, Colour::RESET));
     $error.exit();
   };
   (@trace $error: tt) =>
   {
-    log!(format!("{}{} {}{}{}", $crate::init::init_console::Marker::Fatal, Colour::BOLD,
-                  $error.kind, Colour::RESET,
-                  if let Some(ref a) = $error.context { format!(": {a}") } else { String::new() }));
+    use $crate::init::init_console::Marker::Fatal;
+
+    log!(format!("{}{} {}{}{}", Fatal, Colour::BOLD, $error.kind, Colour::RESET,
+                  if let Some(ref c) = $error.context { format!(": {c}") } else { String::new() }));
 
     if (!$error.trace.is_empty())
     {
-      log!(format!("{}{} >> {}", $crate::init::init_console::Marker::Fatal, Colour::RESET,
-                    $error.trace.trim_end_matches('\n')));
+      log!(format!("{}{} >> {}", Fatal, Colour::RESET, $error.trace.trim_end_matches('\n')));
     }
 
     $error.kind.exit();
@@ -124,18 +140,27 @@ macro_rules! innerFatal
 
 /*
  * .fatal() implementations
- * KTError will throw just the message with no trace
- * KTErrorTrace will provide a trace
+ * Error will throw just the message with no trace
+ * ErrorTrace will provide a trace
  */
-impl ReturnError for KTError
+impl ReturnError for Error
 {
-  fn fatal(self) -> ! { innerFatal!(@traceless self); }
-  fn warn(self) { warn!("{}", self.to_string()); }
+  fn fatal(self) -> !
+  {
+    innerFatal!(@traceless self);
+  }
+  fn warn(self)
+  {
+    warn!("{}", self.to_string());
+  }
 }
 
-impl ReturnError for KTErrorTrace
+impl ReturnError for ErrorTrace
 {
-  fn fatal(self) -> ! { innerFatal!(@trace self); }
+  fn fatal(self) -> !
+  {
+    innerFatal!(@trace self);
+  }
 
   fn warn(self)
   {
@@ -150,23 +175,29 @@ impl ReturnError for KTErrorTrace
 }
 
 // Strip a traceful error down to a traceless error
-impl From<KTErrorTrace> for KTError
+impl From<ErrorTrace> for Error
 {
-  fn from(trace: KTErrorTrace) -> Self { trace.kind }
+  fn from(trace: ErrorTrace) -> Self
+  {
+    trace.kind
+  }
 }
 
 // ...and vice versa
-impl From<KTError> for KTErrorTrace
+impl From<Error> for ErrorTrace
 {
-  fn from(kind: KTError) -> Self { Self::new(kind, "") }
+  fn from(kind: Error) -> Self
+  {
+    Self::new(kind, "")
+  }
 }
 
-impl KTError
+impl Error
 {
   fn exit(self) -> !
   {
     use std::process;
-    use KTError::{AlreadyRunning, NotInit, NotRoot};
+    use Error::{AlreadyRunning, NotInit, NotRoot};
 
     if (!matches!(self, AlreadyRunning | NotInit | NotRoot))
     {
@@ -177,38 +208,38 @@ impl KTError
   }
 }
 
-impl KTErrorTrace
+impl ErrorTrace
 {
-  pub fn new(k: KTError, t: &(impl ToString + ?Sized)) -> Self
+  pub fn new(k: Error, t: &(impl Display + ?Sized)) -> Self
   {
     Self { kind: k, context: None, trace: t.to_string() }
   }
 
-  pub fn with_context(k: KTError, c: &(impl ToString + ?Sized), t: &(impl ToString + ?Sized))
+  pub fn with_context(k: Error, c: &(impl Display + ?Sized), t: &(impl Display + ?Sized))
     -> Self
   {
     Self { kind: k, context: Some(c.to_string()), trace: t.to_string() }
   }
 }
 
-impl<OkType, ErrType: Display> KTErrorResult<OkType, ErrType> for Result<OkType, ErrType>
+impl<OkType, ErrType: Display> ErrorResult<OkType, ErrType> for StdResult<OkType, ErrType>
 {
-  fn trace(self, errorKind: KTError) -> KTResult<OkType>
+  fn trace(self, errorKind: Error) -> Result<OkType>
   {
-    self.map_err(|e| KTErrorTrace::new(errorKind, &e))
+    self.map_err(|e| ErrorTrace::new(errorKind, &e))
   }
 
-  fn context_trace(self, c: impl ToString, k: KTError) -> KTResult<OkType>
+  fn context_trace(self, c: impl Display, k: Error) -> Result<OkType>
   {
-    self.map_err(|e| KTErrorTrace::with_context(k, &c, &e))
+    self.map_err(|e| ErrorTrace::with_context(k, &c, &e))
   }
 }
 
-impl<ErrType: Display> KTErrorResult<(), ErrType> for Option<ErrType>
+impl<ErrType: Display> ErrorResult<(), ErrType> for Option<ErrType>
 {
-  fn trace(self, k: KTError) -> KTResult<()>
+  fn trace(self, k: Error) -> Result<()>
   {
-    if let Some(e) = self.map(|why| KTErrorTrace::new(k, &why))
+    if let Some(e) = self.map(|why| ErrorTrace::new(k, &why))
     {
       Err(e)
     }
@@ -217,9 +248,9 @@ impl<ErrType: Display> KTErrorResult<(), ErrType> for Option<ErrType>
     }
   }
 
-  fn context_trace(self, c: impl Display, k: KTError) -> KTResult<()>
+  fn context_trace(self, c: impl Display, k: Error) -> Result<()>
   {
-    if let Some(e) = self.map(|why| KTErrorTrace::with_context(k, &c, &why))
+    if let Some(e) = self.map(|why| ErrorTrace::with_context(k, &c, &why))
     {
       Err(e)
     }
@@ -229,27 +260,27 @@ impl<ErrType: Display> KTErrorResult<(), ErrType> for Option<ErrType>
   }
 }
 
-impl KTErrorResult<(), String> for String
+impl ErrorResult<(), String> for String
 {
-  fn trace(self, k: KTError) -> KTResult<()>
+  fn trace(self, k: Error) -> Result<()>
   {
-    Err(KTErrorTrace::new(k, &self))
+    Err(ErrorTrace::new(k, &self))
   }
-  fn context_trace(self, c: impl Display, k: KTError) -> KTResult<()>
+  fn context_trace(self, c: impl Display, k: Error) -> Result<()>
   {
-    Err(KTErrorTrace::with_context(k, &c, &self))
+    Err(ErrorTrace::with_context(k, &c, &self))
   }
 }
 
-impl KTErrorResult<(), std::io::Error> for std::io::Error
+impl ErrorResult<(), std::io::Error> for io::Error
 {
-  fn trace(self, k: KTError) -> KTResult<()>
+  fn trace(self, k: Error) -> Result<()>
   {
-    Err(KTErrorTrace::new(k, &self))
+    Err(ErrorTrace::new(k, &self))
   }
-  fn context_trace(self, c: impl Display, k: KTError) -> KTResult<()>
+  fn context_trace(self, c: impl Display, k: Error) -> Result<()>
   {
-    Err(KTErrorTrace::with_context(k, &c, &self))
+    Err(ErrorTrace::with_context(k, &c, &self))
   }
 }
 
@@ -296,7 +327,7 @@ pub use crate::log as log;
 {
   () =>
   {
-    use std::{thread, time::Duration};
+    use std::{thread::sleep, time::Duration};
     use $crate::{state::INIT_STATE, state::InitState::Stalled};
 
     let mut state = INIT_STATE.lock().unwrap();
@@ -306,8 +337,8 @@ pub use crate::log as log;
 
     drop(state);
 
-    // Sleep for 584500000000 years aka a long time
-    thread::sleep(Duration::new(u64::MAX, 0));
+    // Sleep for 584,500,000,000 years aka a long time
+    sleep(Duration::new(u64::MAX, 0));
   };
 }
 pub use crate::stall as stall;
@@ -324,8 +355,9 @@ pub use crate::stall as stall;
   ($($message: tt)*) =>
   {
     {
-      $crate::init::init_console::log!(format!("{} {}", $crate::init::init_console::Marker::Status,
-                                        format!($($message)*)))
+      use $crate::init::init_console::log;
+      log!(format!("{} {}", $crate::init::init_console::Marker::Status,
+                      format!($($message)*)))
     }
   };
 }
@@ -336,9 +368,9 @@ pub use crate::status as status;
   ($($message: tt)*) =>
   {
     {
-      $crate::init::init_console::log!(format!("{} {}{}{}",
-                                              $crate::init::init_console::Marker::Warn,
-                                              Colour::BOLD, format!($($message)*), Colour::RESET))
+      use $crate::init::init_console::log;
+      log!(format!("{} {}{}{}", $crate::init::init_console::Marker::Warn, Colour::BOLD,
+                      format!($($message)*), Colour::RESET))
     }
   };
 }

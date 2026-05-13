@@ -6,6 +6,16 @@
 - [x] Make an io.Power socket, for user power control
       (shutdown/reboot)
 
+- [ ] Add option to create directories in /run for
+      services
+
+- [ ] Require root login for emergency shell for
+      security
+
+- [ ] Actually enforce `target.log_level`
+
+- [ ] Cleanup errors for ktctl & init binaries
+
 - [ ] Add partial compatibility with `systemd`
       (programs that depend on systemd)
 

@@ -1,11 +1,11 @@
 //! Target configuration file sourcing
 
 use std::sync::OnceLock;
-use crate::{init::init_console::KTErrorTrace, path, file_path};
+use crate::{init::init_console::Result, path, file_path};
 
 // KTTargetSource is used for toml::from_str
 #[derive(serde::Deserialize, PartialEq, Eq, Clone, Debug)]
-struct KTTargetSource
+struct TargetSource
 {
   pub services: Option<Vec<String>>,
   pub log_level: Option<u8>,
@@ -15,7 +15,7 @@ struct KTTargetSource
 
 // The final returned target
 #[derive(PartialEq, Eq, Clone, Debug, Default)]
-pub struct KTTarget
+pub struct Target
 {
   pub name: String,
   pub services: Vec<String>,
@@ -34,19 +34,19 @@ pub static TARGET_NAME: OnceLock<String> = OnceLock::new();
   * - The configuration file couldn't be parsed (usually for bad syntax),
   * - No services were provided in the configuration
  **/
-pub fn source(name: String) -> Result<KTTarget, KTErrorTrace>
+pub fn source(name: String) -> Result<Target>
 {
-  use crate::{init::init_console::{KTError, KTErrorTrace, KTErrorResult}};
+  use crate::{init::init_console::{Error, ErrorTrace, ErrorResult}};
   use std::fs;
 
   // Read toml contents from target config to string
   let targetToml = fs::read_to_string(file_path!(path!(crate::PREFIX, "target"), &name, "toml"))
-                    .trace(KTError::FileNotFound)?;
+                    .trace(Error::FileNotFound)?;
 
   // Source the configuration
-  let sourcedTarget: KTTargetSource = toml::from_str(&targetToml).trace(KTError::TargetParse)?;
+  let sourcedTarget: TargetSource = toml::from_str(&targetToml).trace(Error::TargetParse)?;
 
-  let services = sourcedTarget.services.ok_or(KTErrorTrace::new(KTError::TargetMissingValue,
+  let services = sourcedTarget.services.ok_or(ErrorTrace::new(Error::TargetMissingValue,
                                                   &format!("services[] missing in {name}.toml")))?;
 
   // Set our target values or the default if not specified in sourced config
@@ -54,12 +54,12 @@ pub fn source(name: String) -> Result<KTTarget, KTErrorTrace>
   let hostname = sourcedTarget.hostname.unwrap_or(String::from("localhost"));
   let debugDump = sourcedTarget.debug_dump.unwrap_or(false);
 
-  if (sourcedTarget.debug_dump.is_some() && !cfg!(debug_assertions))
+  if (sourcedTarget.debug_dump == Some(true) && !cfg!(debug_assertions))
   {
     use crate::{init::init_console::warn, console::Colour};
     // This will have no effect on release builds
     warn!("debug dump is enabled in target '{name}', but you are using a release build");
   }
 
-  Ok(KTTarget { name, services, logLevel, hostname, debugDump })
+  Ok(Target { name, services, logLevel, hostname, debugDump })
 }

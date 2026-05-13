@@ -9,22 +9,26 @@ pub mod init_console;
 pub mod mount;
 pub mod service;
 pub mod target;
+pub mod socket;
 
 use std::sync::OnceLock;
-use crate::init::init_console::{KTError, KTErrorTrace};
+use self::init_console::{Error, ErrorTrace, Result};
 
-#[derive(Eq, PartialEq, Copy, Clone, Debug)]
-pub enum PowerLevel { Off, Reboot }
-
-pub static POWER_LEVEL: OnceLock<PowerLevel> = OnceLock::new();
-pub static UP_SERVICES: OnceLock<Vec<String>> = OnceLock::new();
+// Once the target is sourced its configuration will be stored here
+pub static TARGET: OnceLock<self::target::Target> = OnceLock::new();
 
 // The default shell will be bash unless the "posix_sh" feature is set
-#[cfg(feature = "posix_sh")]
-pub(crate) const SHELL: &str = "/bin/sh";
-
-#[cfg(not(feature = "posix_sh"))]
-pub(crate) const SHELL: &str = "/bin/bash";
+pub(crate) const SHELL: &str =
+{
+  // Some distros such as Alpine will use more lightweight shells, such as ash
+  if (cfg!(feature = "posix_sh"))
+  {
+    "/bin/sh"
+  }
+  else {
+    "/bin/bash"
+  }
+};
 
 /**
   * # Errors
@@ -34,14 +38,14 @@ pub(crate) const SHELL: &str = "/bin/bash";
  **/
 // Get a command-line parameter using the /proc/cmdline file
 #[inline]
-pub fn cmdlineParam(param: &str) -> Result<Option<String>, KTErrorTrace>
+pub fn cmdlineParam(param: &str) -> Result<Option<String>>
 {
   use std::{fs, path::PathBuf};
-  use crate::init::init_console::KTErrorResult;
+  use crate::init::init_console::ErrorResult;
 
   // Read the cmdline from procfs
   let cmdline = fs::read_to_string(PathBuf::from("/proc/cmdline"))
-                    .context_trace("/proc/cmdline", KTError::FileNotFound)?;
+                    .context_trace("/proc/cmdline", Error::FileNotFound)?;
 
   // Split the cmdline's parameters by spaces
   for rawCmdlineParam in (cmdline.split(' '))
@@ -66,22 +70,5 @@ pub fn cmdlineParam(param: &str) -> Result<Option<String>, KTErrorTrace>
   }
 
   // Command-line parameter was not found at all
-  Err(KTErrorTrace::with_context(KTError::Cmdline, param, ""))
-}
-
-impl TryFrom<u8> for PowerLevel
-{
-  type Error = ();
-
-  fn try_from(byte: u8) -> Result<Self, ()>
-  {
-    use crate::socket::Power;
-
-    match (byte)
-    {
-      Power::SHUTDOWN => Ok(Self::Off),
-      Power::REBOOT => Ok(Self::Reboot),
-      _ => Err(())
-    }
-  }
+  Err(ErrorTrace::with_context(Error::Cmdline, param, ""))
 }

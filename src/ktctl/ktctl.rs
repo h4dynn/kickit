@@ -6,77 +6,77 @@
 extern crate chrono;
 
 use std::{fs, fs::File, path::PathBuf, ffi::OsString, fmt};
-use kickit::{console::{HandleKTError, Colour},
+use kickit::{console::{HandleError, Colour},
               ktctl::ktctl_console::{KTCtlErrorTrace, ConvKTCtlError, KTCtlError},
               console::affirm, display_enum, binary, path, state::InitState, Data};
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
-enum Usage
-{
-  #[doc = include_str!("../../docs/ktctl_usage/main.txt")] #[default] Main,
-  #[doc = include_str!("../../docs/ktctl_usage/log.txt")] Log,
-  #[doc = include_str!("../../docs/ktctl_usage/service.txt")] Service,
-  Taskitty
-}
-
+// Dummy structure
 struct Init;
+
+// Lookup service from the runfs directory
 #[derive(PartialEq, Eq, Clone, Debug)]
-struct Service { name: String }
+struct Service
+{
+  name: String
+}
 
 trait RunOperation
 {
-  fn requires_root(&self) -> bool;
-  fn requires_init(&self) -> bool;
+  fn root(&self) -> bool;
+  fn initOnly(&self) -> bool;
 
   #[inline]
-  fn sanity(&self) -> Result<(), KTCtlErrorTrace>
+  async fn sanity(&self) -> Result<(), KTCtlErrorTrace>
   {
     use nix::unistd::getuid;
 
-    if (self.requires_root())
+    if (self.root())
     {
+      // Make sure we are root user
       affirm!(getuid().is_root(), KTCtlErrorTrace::new(KTCtlError::BadPerms, ""));
     }
 
-    if (self.requires_init())
+    if (self.initOnly())
     {
-      affirm!(Init::is_running(), KTCtlErrorTrace::new(KTCtlError::InitNotRunning, ""));
+      // Needs kickit to be ran
+      affirm!(Init::is_running().await, KTCtlErrorTrace::new(KTCtlError::InitNotRunning, ""));
     }
 
     Ok(())
   }
 
-  fn run(self) -> Result<(), KTCtlErrorTrace>;
+  async fn run(self) -> Result<(), KTCtlErrorTrace>;
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 #[must_use]
 enum Operation
 {
-  Help(Option<String>), Version, ServiceList(Vec<String>),
+  Help(Option<String>), Version, ServiceList(Option<Vec<String>>),
   ServiceRestart(String), State, Log(String, bool, bool),
   TargetInfo, Shutdown, Reboot
 }
 
 trait SocketRequest: Sized
 {
+  // Whether we need root access for this socket or not
+  const IS_PRIVATE: bool;
+
   /*
    * Provide a matching input byte for the socket request, this is what we
    * will write to the socket to send the request, and receive output data
    */
   fn in_byte(&self) -> u8;
 
-  // Whether we need root access for this socket or not
-  fn is_private() -> bool;
-
   // The name for the socket we access
   fn name(&self) -> String;
 
-  fn request(self) -> Result<Data, KTCtlErrorTrace>
+  async fn request(self) -> Result<Data, KTCtlErrorTrace>
   {
-    use std::{os::unix::net::UnixStream, io::{Read, Write}};
+    use tokio::{net::UnixStream, io::AsyncReadExt};
 
-    let path = if (Self::is_private())
+    // Determine where the socket is that we want to interact with
+    let path = if (Self::IS_PRIVATE)
     {
       format!("/run/kickit/private/io.{}", self.name())
     }
@@ -84,17 +84,20 @@ trait SocketRequest: Sized
       format!("/run/kickit/io.{}", self.name())
     };
 
-    let mut io = UnixStream::connect(&path).context_trace(&path, KTCtlError::SocketAccessFail)?;
+    // Open a new connection to the socket, may fail if there is an existing connection
+    let mut io = UnixStream::connect(&path).await.context_trace(&path, KTCtlError::SocketAccessFail)?;
     let mut out = Data::new();
 
-    io.write_all(&[self.in_byte()]).trace(KTCtlError::AccessRunFsFail)?;
-    io.read_to_end(&mut out).context_trace("io.Core", KTCtlError::SocketAccessFail)?;
+    io.writable().await.trace(KTCtlError::SocketAccessFail)?;
+    io.try_write(&[self.in_byte()]).trace(KTCtlError::AccessRunFsFail)?;
+    io.readable().await.trace(KTCtlError::SocketAccessFail)?;
+    io.read_to_end(&mut out).await.context_trace("io.Core", KTCtlError::SocketAccessFail)?;
 
     // An 0x0f byte means the operation failed
     if (out.as_slice() == [0x0f])
     {
       Err(KTCtlErrorTrace::new(KTCtlError::SocketAccessFail,
-          &format!("Error returned by init after requesting {}", self.name())))
+            &format!("Error returned by init after requesting {}", self.name())))
     }
     else {
       Ok(out)
@@ -134,64 +137,112 @@ mod Socket
   {
     { for $($name: ty { private = $private: tt }),* } =>
     {
-      $(impl super::SocketRequest for $name
-      {
-        fn in_byte(&self) -> u8 { *self as u8 }
-        fn is_private() -> bool { $private }
-        fn name(&self) -> String { self.to_string() }
-      })*
+      $(
+        impl super::SocketRequest for $name
+        {
+          const IS_PRIVATE: bool = $private;
+
+          fn in_byte(&self) -> u8
+          {
+            *self as u8
+          }
+          fn name(&self) -> String
+          {
+            self.to_string()
+          }
+        }
+      )*
     };
     { for $($name: ty = $byte: path { private = $private: tt }),* } =>
     {
-      $(impl super::SocketRequest for $name
-      {
-        fn in_byte(&self) -> u8 { $byte }
-        fn is_private() -> bool { $private }
-        fn name(&self) -> String { self.to_string() }
-      })*
+      $(
+        impl super::SocketRequest for $name
+        {
+          const IS_PRIVATE: bool = $private;
+
+          fn in_byte(&self) -> u8
+          {
+            $byte
+          }
+          fn name(&self) -> String
+          {
+            self.to_string()
+          }
+        }
+      )*
     };
   }
 
-  impl_SocketRequest! { for Core { private = false }, Power { private = true } }
-  impl_SocketRequest! { for Log = socket::Log::MASTER { private = true } }
+  impl_SocketRequest!
+  {
+    for Core { private = false },
+    Power { private = true }
+  }
+  impl_SocketRequest!
+  {
+    for Log = socket::Log::MASTER { private = true }
+  }
 }
 
-display_enum! { Socket::Core { _ => "Core" }, Socket::Power { _ => "Power" } }
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+enum Usage
+{
+  #[doc = include_str!("../../docs/ktctl_usage/main.txt")]
+  #[default]
+  Main,
+
+  #[doc = include_str!("../../docs/ktctl_usage/log.txt")]
+  Log,
+
+  #[doc = include_str!("../../docs/ktctl_usage/service.txt")]
+  Service,
+
+  Taskitty
+}
+
+display_enum!
+{
+  Socket::Core { _ => "Core" },
+  Socket::Power { _ => "Power" }
+}
 display_enum!
 {
   // Show the usage prompts for the help operation
   Usage {
     Main =>
-      format!("{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}\n{}\n",
-              "Usage: ", binary!(), " [OPERATION]",
-              "Manage the kickit init system",
-              '\n',
-              "Operations:",
-              " help                     Show this help prompt",
-              " version                  Show kickit version",
-              " service [S]              List all services or selected services",
-              " service-restart [S]      Restart a service",
-              " log [S]                  Read a service's logs",
-              " state                    Show current init state",
-              " target                   Show current loaded target",
-              " shutdown                 Shutdown this device",
-              " reboot                   Reboot this device",
-              '\n',
-              "Try 'ktctl help [OPERATION]' for more info",
-              b = Colour::BOLD, r = Colour::RESET),
-
-    Log => format!("{}{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n",
-                  "Usage: ", binary!(), " log", " [ARGUMENTs..] [SERVICE]",
-                  "View a service's or init's logs (requires root access)",
-                  '\n',
-                  "Arguments:",
-                  " --plain              Plain output (no colours + timestamp as millis)",
-                  " --init               View the init's master log",
-                  " --service-only       Ignore any messages from init",
-                  b = Colour::BOLD, r = Colour::RESET),
-
+    {
+      format!("{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}\n{}\n",
+        "Usage: ", binary!(), " [OPERATION]",
+        "Manage the kickit init system",
+        '\n',
+        "Operations:",
+        " help                     Show this help prompt",
+        " version                  Show kickit version",
+        " service [S]              List all services or selected services",
+        " log [S]                  Read a service's logs",
+        " state                    Show current init state",
+        " target                   Show current loaded target",
+        " shutdown                 Shutdown this device",
+        " reboot                   Reboot this device",
+        '\n',
+        "Try 'ktctl help [OPERATION]' for more info",
+        b = Colour::BOLD, r = Colour::RESET
+      )
+    },
+    Log =>
+    {
+      format!("{}{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n",
+        "Usage: ", binary!(), " log", " [ARGUMENTs..] [SERVICE]",
+        "View a service's or init's logs (requires root access)",
+        '\n',
+        "Arguments:",
+        " --plain              Plain output (no colours + timestamp as millis)",
+        " --init               View the init's master log",
+        " --service-only       Ignore any messages from init",
+        b = Colour::BOLD, r = Colour::RESET
+      )
+    },
     Service => format!("Usage: {}{} service{} [NAMEs..]", binary!(), Colour::BOLD, Colour::RESET),
-
     // her name is taskitty ^.^
     Taskitty => include_str!("../../assets/taskitty.txt").to_string()
   }
@@ -199,31 +250,31 @@ display_enum!
 
 impl RunOperation for Operation
 {
-  fn requires_root(&self) -> bool
+  fn root(&self) -> bool
   {
     matches!(self, Self::Log(..) | Self::Shutdown | Self::Reboot)
   }
 
-  fn requires_init(&self) -> bool
+  fn initOnly(&self) -> bool
   {
     matches!(self, Self::ServiceList(..) | Self::TargetInfo | Self::Log(..) |
-                   Self::Shutdown | Self::Reboot)
+                    Self::Shutdown | Self::Reboot)
   }
 
-  fn run(self) -> Result<(), KTCtlErrorTrace>
+  async fn run(self) -> Result<(), KTCtlErrorTrace>
   {
     use Operation::{Help, Version, ServiceList, ServiceRestart, State, TargetInfo,
-                    Log, Shutdown, Reboot};
+                  Log, Shutdown, Reboot};
 
-    self.sanity()?;
+    self.sanity().await?;
 
     match (self)
     {
       Help(..) => self.help(), Version => { Self::version(); Ok(()) },
-      ServiceList(s) => Self::serviceList(s.as_slice()),
-      ServiceRestart(s) => Self::serviceRestart(s), State => Init::prettyState(),
-      TargetInfo => Self::targetInfo(), Log(s, u, i) => Self::readLog(&s as &str, u, i),
-      Shutdown => Self::shutdown(), Reboot => Self::reboot()
+      ServiceList(s) => Self::serviceList(s.as_deref()),
+      ServiceRestart(s) => Self::serviceRestart(s), State => Init::prettyState().await,
+      TargetInfo => Self::targetInfo().await, Log(s, u, i) => Self::readLog(&s as &str, u, i).await,
+      Shutdown => Self::shutdown().await, Reboot => Self::reboot().await
     }
   }
 }
@@ -242,89 +293,104 @@ impl TryFrom<&str> for Usage
 
   fn try_from(str_flag: &str) -> Result<Self, ()>
   {
-    match (str_flag) { "" => Ok(Usage::Main), "log" => Ok(Usage::Log),
-                        "service" => Ok(Usage::Service), "purr" => Ok(Usage::Taskitty),
-                        _ => Err(()) }
+    match (str_flag)
+    {
+      "" => Ok(Usage::Main), "log" => Ok(Usage::Log),
+      "service" => Ok(Usage::Service), "purr" => Ok(Usage::Taskitty),
+      _ => Err(())
+    }
   }
 }
 
 impl Init
 {
-  pub fn state() -> InitState
+  pub async fn state() -> InitState
   {
-    if let Ok(state) = Socket::Core::State.request()
+    use InitState::{Down, Emergency, Stalled};
+
+    if let Ok(state) = Socket::Core::State.request().await
     {
       // Convert the state from a u8 byte to an InitState
       match (state[0].into())
       {
-        // No further checks need to be done here
-        InitState::Emergency | InitState::Stalled => return state[0].into(),
         InitState::Ok =>
         {
           /*
            * Make sure the version of `ktctl` and `kickit` match to avoid
            * potential compatibility issues
            */
-          if (Socket::Core::Version.request() ==
-                        Ok(format!("{}\n", kickit::VERSION).as_bytes().to_vec()))
+          if let Ok(version) = Socket::Core::Version.request().await &&
+              (version.as_slice() == format!("{}\n", kickit::VERSION).as_bytes())
           {
             return InitState::Ok
           }
-        }
+        },
+        // No further checks need to be done here
+        Emergency | Stalled => return state[0].into(),
         // Falls down to the end of the function
-        InitState::Down => ()
+        Down => ()
       }
     }
-    InitState::Down
+    Down
   }
 
   // Print the state in a pretty way
   #[inline]
-  pub fn prettyState() -> Result<(), KTCtlErrorTrace>
+  pub async fn prettyState() -> Result<(), KTCtlErrorTrace>
   {
+    use Socket::Core::Pid;
     use InitState::{Emergency, Down, Stalled, Ok};
 
-    let state = Self::state();
+    let state = Self::state().await;
     // Matching colour for our init state (e.g. up / running = green)
     let colour = match (state)
     {
       Emergency | Down => Colour::RED, Stalled => Colour::ORANGE, Ok => Colour::GREEN
     };
-    // Addon the PID of the kickit process if it isn't running as the main init
-    let addon = if (state == Ok)
-    {
-      let initPid = u32::from_be_bytes(Socket::Core::Pid.request()?
-                                        .try_into()
-                                        .map_err(|_| KTCtlErrorTrace::new(KTCtlError::Format,
-                                                  "Invalid init pid!"))?);
 
-      if (initPid == 1)
-      {
-        // No addon needed here
-        String::new()
-      }
-      else {
-        format!(" (pid: {initPid})")
-      }
+    let initPid = u32::from_be_bytes(Pid.request().await?
+                                      .try_into()
+                                      .map_err(|_| KTCtlErrorTrace::new(KTCtlError::Format, "Invalid init pid!"))?);
+
+    if (initPid > 1)
+    {
+      println!("{colour}{state}{} (pid: {initPid})", Colour::RESET);
     }
     else {
-      String::new()
-    };
+      println!("{colour}{state}{}", Colour::RESET);
+    }
 
-    println!("{colour}{state}{}{addon}", Colour::RESET);
     Result::Ok(())
   }
 
   // Check if init is running
-  pub fn is_running() -> bool { Self::state() == InitState::Ok }
+  pub async fn is_running() -> bool
+  {
+    Self::state().await != InitState::Down
+  }
 }
-
-impl From<&str> for Service { fn from(name: &str) -> Self { Self { name: name.into() } } }
 
 impl From<OsString> for Service
 {
   // Display our OsString first and then use that Display to be converted to a String
-  fn from(name: OsString) -> Self { Self { name: name.display().to_string() } }
+  fn from(name: OsString) -> Self
+  {
+    Self { name: name.display().to_string() }
+  }
+}
+
+/*
+ * (slight annoyance): we can't use a generic AsRef<str> because of way too strict
+ * Rust compilation rules:
+ *   upstream crates may add a new impl of trait `std::convert::AsRef<str>` for type
+ *   `std::ffi::OsString` in future versions
+ */
+impl From<&str> for Service
+{
+  fn from(name: &str) -> Self
+  {
+    Self { name: name.to_owned() }
+  }
 }
 
 impl Service
@@ -348,7 +414,8 @@ impl Service
     }
   }
 
-  #[inline] pub fn path(&self, pathName: &str) -> Result<String, KTCtlErrorTrace>
+  #[inline]
+  pub fn path(&self, pathName: &str) -> Result<String, KTCtlErrorTrace>
   {
     if (pathName == "stat")
     {
@@ -364,14 +431,17 @@ impl Service
   {
     let status: String =
     [
-      String::from(if (self.is_standard())
+      String::from(
       {
-        // Standard services will contain more information (e.g. pid)
-        "├─ Status: "
-      }
-      else {
-        // Non-standard services will just have a status & nothing else
-        "└─ Status: "
+        if (self.is_standard())
+        {
+          // Standard services will contain more information (e.g. pid)
+          "├─ Status: "
+        }
+        else {
+          // Non-standard services will just have a status & nothing else
+          "└─ Status: "
+        }
       }),
       if (self.is_standard())
       {
@@ -382,18 +452,18 @@ impl Service
           match (stat.split(' ').nth(2))
           {
             // Z = zombie (stopped running) and X = killed (by another process)
-            Some("Z" | "X") => format!("{}Dead", Colour::RED),
+            Some("Z" | "X") => format!("{}Dead{}", Colour::RED, Colour::RESET),
             // These are all acceptable process statuses
-            Some("S" | "I" | "D" | "R") => format!("{}Up", Colour::GREEN),
+            Some("S" | "I" | "D" | "R") => format!("{}Up{}", Colour::GREEN, Colour::RESET),
             /*
              * This might happen sometimes, for example on older kernel versions which
              * may have additional signals which are now removed / deprecated
              */
-            Some(..) | None => format!("{}Unknown", Colour::RED)
+            Some(..) | None => format!("{}Unknown{}", Colour::RED, Colour::RESET)
           }
         }
         else {
-          format!("{}Dead", Colour::RED)
+          format!("{}Dead{}", Colour::RED, Colour::RESET)
         }
       }
       /*
@@ -402,13 +472,12 @@ impl Service
        */
       else if (fs::metadata(path!("/run/kickit/service/", &self.name, "exited")).is_ok())
       {
-        format!("{}Finished", Colour::GREEN)
+        format!("{}Finished{}", Colour::GREEN, Colour::RESET)
       }
       // If not, it exited on a failure (non-zero)
       else {
-        format!("{}Failed", Colour::RED)
-      },
-      Colour::RESET.to_string()
+        format!("{}Failed{}", Colour::RED, Colour::RESET)
+      }
     ]
       .join("");
 
@@ -470,7 +539,7 @@ impl Operation
                                             b = Colour::BOLD, r = Colour::RESET);
   }
 
-  fn serviceList(targets: &[String]) -> Result<(), KTCtlErrorTrace>
+  fn serviceList(maybeTargets: Option<&[String]>) -> Result<(), KTCtlErrorTrace>
   {
     for service in (fs::read_dir(PathBuf::from("/run/kickit/service"))
                       .trace(KTCtlError::RunFsParseFail)?)
@@ -479,8 +548,15 @@ impl Operation
       let upService: Service = service.trace(KTCtlError::AccessRunFsFail)?.file_name().into();
 
       // Only print if targets provided by user allow
-      if (targets.is_empty() || (targets.contains(&upService.name)))
+      if let Some(targets) = maybeTargets
       {
+        if (targets.contains(&upService.name))
+        {
+          upService.print()?;
+        }
+      }
+      else {
+        // Print all the services
         upService.print()?;
       }
     }
@@ -490,47 +566,50 @@ impl Operation
 
   fn serviceRestart(_service: String) -> Result<(), KTCtlErrorTrace>
   {
-    todo!(); //Ok(())
+    todo!();
   }
 
-  fn targetInfo() -> Result<(), KTCtlErrorTrace>
+  async fn targetInfo() -> Result<(), KTCtlErrorTrace>
   {
     // Read target name from the socket, and format as a String
-    eprint!("{}", String::from_utf8(Socket::Core::Target.request()?)
+    eprint!("{}", String::from_utf8(Socket::Core::Target.request().await?)
                       .context_trace("target", KTCtlError::Format)?);
     Ok(())
   }
 
-  fn shutdown() -> Result<(), KTCtlErrorTrace>
+  async fn shutdown() -> Result<(), KTCtlErrorTrace>
   {
     use std::{thread, time::Duration};
-    Socket::Power::Shutdown.request().map(|_| thread::sleep(Duration::new(u64::MAX, 0)))
+    Socket::Power::Shutdown.request().await.map(|_| thread::sleep(Duration::new(u64::MAX, 0)))
   }
 
-  fn reboot() -> Result<(), KTCtlErrorTrace>
+  async fn reboot() -> Result<(), KTCtlErrorTrace>
   {
     use std::{thread, time::Duration};
-    Socket::Power::Reboot.request().map(|_| thread::sleep(Duration::new(u64::MAX, 0)))
+    Socket::Power::Reboot.request().await.map(|_| thread::sleep(Duration::new(u64::MAX, 0)))
   }
 
-  fn readLog(serviceName: &str, ugly: bool, ignoreInit: bool) -> Result<(), KTCtlErrorTrace>
+  async fn readLog(serviceName: &str, ugly: bool, ignoreInit: bool) -> Result<(), KTCtlErrorTrace>
   {
     use chrono::{Local, DateTime};
-    use std::{io, io::{BufReader, BufWriter, Write, ErrorKind}};
-    use zstd::stream::decode_all as zstdDecompressFile;
+    use std::{io, io::{BufWriter, Read, Write, ErrorKind::BrokenPipe}, process::exit};
+    use ruzstd::decoding::StreamingDecoder;
 
     // Not a service, we want to read the init's logs
     if (serviceName == "init")
     {
-      eprintln!("{}", String::from_utf8(Socket::Log.request()?).trace(KTCtlError::Format)?);
+      eprintln!("{}", String::from_utf8(Socket::Log.request().await?).trace(KTCtlError::Format)?);
       return Ok(())
     }
 
-    let serviceLog = File::open(path!("/run/kickit/service", &serviceName, "log"))
-                      .context_trace(serviceName, KTCtlError::BadService)?;
+    // The decoder implements Read to idiomatically decompress
+    let mut serviceLog = StreamingDecoder::new(File::open(path!("/run/kickit/service", &serviceName, "log"))
+                                            .context_trace(serviceName, KTCtlError::BadService)?)
+                          .context_trace(serviceName, KTCtlError::LogAccessFail)?;
 
+    let mut logBin = Vec::new();
     // Read (potentially binary) log contents
-    let logBin = zstdDecompressFile(BufReader::new(serviceLog)).trace(KTCtlError::AccessRunFsFail)?;
+    serviceLog.read_to_end(&mut logBin).trace(KTCtlError::AccessRunFsFail)?;
 
     // Our stdout that we write to
     let mut out = BufWriter::new(io::stdout());
@@ -540,14 +619,9 @@ impl Operation
     let mut logContents = String::new();
     let mut fromInit = false;
 
-    // Count all the log bytes we go through in case for error reporting
-    let mut logByteCount: usize = 0;
-
     // Loop through each byte in the log
-    for logByte in (logBin)
+    for (logByteCount, logByte) in (logBin.iter().enumerate())
     {
-      logByteCount += 1;
-
       match (logByte)
       {
         b'\n' =>
@@ -557,42 +631,44 @@ impl Operation
           {
             let marker = if (fromInit)
             {
-              [
-                if (ugly)
-                {
-                  String::new()
-                }
-                else {
-                  Colour::BOLD.to_string()
-                },
-                format!("(kickit){} ", Colour::RESET) ].concat()
+              if (ugly)
+              {
+                String::from("(kickit) ")
+              }
+              else {
+                format!("{}(kickit){} ", Colour::BOLD, Colour::RESET)
+              }
             }
             else {
               String::new()
             };
 
-            let lineFmt = if (ugly)
+            let lineFormatted =
             {
-              // Don't make the timestamp human-readable, just millis
-              format!("[{timestamp}] {marker}{logContents}\n")
-            }
-            else {
-              // Convert the millis type from a String to i64 so it is accepted by chrono
-              let timestampUgly: i64 = timestamp.parse().trace(KTCtlError::Format)?;
+              if (ugly)
+              {
+                // Don't make the timestamp human-readable, just millis
+                format!("[{timestamp}] {marker}{logContents}\n")
+              }
+              else {
+                // Convert the millis type from a String to i64 so it is accepted by chrono
+                let timestampUgly: i64 = timestamp.parse().trace(KTCtlError::Format)?;
 
-              /*
-               * Get the timestamp from the log and convert it into an actual date & time,
-               * then convert from UTC timezone to the system's timzone (Local)
-               */
-              let logTime: DateTime<Local> = DateTime::from_timestamp_millis(timestampUgly)
-                                            .context_trace(serviceName, KTCtlError::LogAccessFail)?
-                                            .into();
+                /*
+                 * Get the timestamp from the log and convert it into an actual date & time,
+                 * then convert from UTC timezone to the system's timzone (Local) using
+                 * the chrono crate magic
+                 */
+                let logTime: DateTime<Local> = DateTime::from_timestamp_millis(timestampUgly)
+                                                .context_trace(serviceName, KTCtlError::LogAccessFail)?
+                                                .into();
 
-              /*
-               * Format time as <Day Month Year, Hours:Minutes:Seconds> to not
-               * anger the Americans
-               */
-              format!("[{}] {marker}{logContents}\n", logTime.format("%d %b %Y, %H:%M:%S"))
+                /*
+                 * Format time as <Day Month Year, Hours:Minutes:Seconds> to not
+                 * anger the Americans
+                 */
+                format!("[{}] {marker}{logContents}\n", logTime.format("%d %b %Y, %H:%M:%S"))
+              }
             };
 
             /*
@@ -605,18 +681,9 @@ impl Operation
              * (note): This may change in the future though, see
              * <https://github.com/rust-lang/rust/issues/62569>
              */
-            if let Err(error) = out.write_all(lineFmt.as_bytes())
-            {
-              // The expected """error""" in question: SIGPIPE
-              if (error.kind() == ErrorKind::BrokenPipe)
-              {
-                // Exit without an error
-                std::process::exit(0);
-              }
-
-              // An *actual* error was found
-              Err(error).trace(KTCtlError::Format)?;
-            }
+            out.write_all(lineFormatted.as_bytes())
+                .map_err(|e| if (e.kind() == BrokenPipe) { exit(0) } else { e })
+                .trace(KTCtlError::Format)?;
           }
 
           // Reset our values for next line
@@ -630,7 +697,7 @@ impl Operation
           // Must be the 14th byte or else something is wrong
           affirm!(timestamp.len() == 13 && logContents.is_empty(),
             KTCtlErrorTrace::with_context(KTCtlError::Format, &serviceName,
-                                          &format!("Unexpected byte 0x8F on byte {logByteCount}")));
+              &format!("Unexpected byte 0x8F on byte {logByteCount}")));
 
           fromInit = true;
         },
@@ -639,10 +706,12 @@ impl Operation
           // The timestamp is just 13 bytes long
           if (timestamp.len() < 13)
           {
-            timestamp.push(logByte as char);
+            // We are not done reading the full timestamp
+            timestamp.push(*logByte as char);
           }
           else {
-            logContents.push(logByte as char);
+            // This is real log content, not a timestamp
+            logContents.push(*logByte as char);
           }
         }
       }
@@ -652,44 +721,52 @@ impl Operation
   }
 }
 
-fn cliArguments(arguments: &[String]) -> Result<Operation, KTCtlErrorTrace>
+// Handle user arguments, including the operation & targets for it
+fn parseArgs(arguments: &[String]) -> Result<Operation, KTCtlErrorTrace>
 {
-  if (arguments.len() == 1) { return Ok(Operation::Help(None)) }
+  use Operation::{Help, Version, TargetInfo, State, ServiceList, ServiceRestart, Log, Shutdown, Reboot};
 
-  match (&arguments[1] as &str)
+  if (arguments.len() == 1)
   {
-    "-h" | "--help" => Ok(Operation::Help(None)),
-    "version" => Ok(Operation::Version),
-    "target" => Ok(Operation::TargetInfo),
-    "state" => Ok(Operation::State),
+    return Ok(Help(None))
+  }
+
+  Ok(match (&arguments[1] as &str)
+  {
+    "-h" | "--help" => Help(None),
+    "version" => Version,
+    "target" => TargetInfo,
+    "state" => State,
     "help" =>
     {
-      Ok(if (arguments.len() == 2)
+      if (arguments.len() == 2)
       {
-        Operation::Help(None)
+        // Regular help prompt
+        Help(None)
       }
       else {
-        Operation::Help(Some(arguments[2].clone()))
-      })
+        // Help prompt about a specific operation
+        Help(Some(arguments[2].clone()))
+      }
     },
     "service" =>
     {
-      Ok(if (arguments.len() == 2)
+      if (arguments.len() == 2)
       {
-        Operation::ServiceList(Vec::new())
+        ServiceList(None)
       }
       else {
-        Operation::ServiceList(arguments[2..].into())
-      })
+        ServiceList(Some(arguments[2..].into()))
+      }
     },
     "service-restart" =>
     {
       if (arguments.len() == 3)
       {
-        Ok(Operation::ServiceRestart(arguments[2].clone()))
+        ServiceRestart(arguments[2].clone())
       }
       else {
-        Err(KTCtlErrorTrace::new(KTCtlError::MissingArgument, "service-restart"))
+        Err(KTCtlErrorTrace::new(KTCtlError::MissingArgument, "service-restart"))?
       }
     },
     "log" =>
@@ -706,38 +783,48 @@ fn cliArguments(arguments: &[String]) -> Result<Operation, KTCtlErrorTrace>
 
       let mut argIter = args.iter();
 
-      let serviceName: String = if (args.iter().any(|arg| arg == "--init"))
+      let serviceName =
       {
-        String::from("init")
-      }
-      else {
-        loop {
-          match (argIter.next())
-          {
-            // Check for argument with a valid potential name
-            Some(x) => { if (!x.starts_with("--")) { break Ok(x) } },
-            // Cycled all through possible arguments without a matching name
-            None => break Err(KTCtlErrorTrace::new(KTCtlError::MissingArgument, "log"))
-          }
-        }?
-          .to_owned()
+        if (args.iter().any(|arg| arg == "--init"))
+        {
+          // Not a service, just display stuff
+          String::from("init")
+        }
+        else {
+          // Can't use for loop because you can't break in one for some reason
+          loop {
+            match (argIter.next())
+            {
+              // Check for argument with a valid potential name
+              Some(argument) =>
+              {
+                if (!argument.starts_with("--"))
+                {
+                  break Ok(argument)
+                }
+              },
+              // Cycled through all possible arguments without a matching name
+              None => break Err(KTCtlErrorTrace::new(KTCtlError::MissingArgument, "log"))
+            }
+          }?.to_owned()
+        }
       };
-
-      Ok(Operation::Log(serviceName, ugly, ignoreInit))
+      Log(serviceName, ugly, ignoreInit)
     },
-    "shutdown" => Ok(Operation::Shutdown),
-    "reboot" => Ok(Operation::Reboot),
+    "shutdown" => Shutdown,
+    "reboot" => Reboot,
     // Unknown operation
-    _ => Err(KTCtlErrorTrace::new(KTCtlError::InvalidOperation, &arguments[1]))
-  }
+    _ => Err(KTCtlErrorTrace::new(KTCtlError::InvalidOperation, &arguments[1]))?
+  })
 }
 
-fn main()
+#[tokio::main]
+async fn main()
 {
   use std::env;
 
   // Extract operation from our arguments or throw error
-  let operation = cliArguments(env::args().collect::<Vec<_>>().as_slice()).handle();
+  let operation = parseArgs(&env::args().collect::<Vec<String>>()).handle();
 
-  operation.run().handle();
+  operation.run().await.handle();
 }

@@ -1,4 +1,20 @@
-## 23-29 Nov
+## 12-13 May 2026
+
+* Move zstd compression impl from `zstd-rs` to `ruzstd`
+
+* Refactor sockets (remove messy service socket, use tokio)
+
+* General code format cleanup
+
+## 30 Nov - 6 Dec 2025
+
+* Add implementation for accessing master log from `ktctl`
+
+* Improve & clenaup socket implementation
+
+* Cleanup some `ktctl` code
+
+## 23-29 Nov 2025
 
 [4923e2d](https://github.com/h4dynn/kickit/commit/4923e2d683e3f850568416a55ce55d349c7c5003)
 
@@ -7,12 +23,3 @@
 * Add shutdown/reboot support via power socket
 
 * Cleanup `ktctl` socket i/o
-
-## 30 Nov - 6 Dec
-
-* Add implementation for accessing master log from `ktctl`
-
-* Improve & clenaup socket implementation
-
-* Cleanup some `ktctl` code
-

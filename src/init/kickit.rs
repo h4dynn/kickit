@@ -5,10 +5,52 @@
 
 use std::{fs, fs::File, io::Write, path::PathBuf, process};
 use nix::unistd::getuid;
-use tokio::task;
-use kickit::{console::Colour, console::{ReturnError, HandleKTError},
-             init::{init_console::{KTError, KTErrorTrace, KTErrorResult, status, stall},
-                    service::{Service, SERVICE_HANDLES}, UP_SERVICES}, letOnceLock};
+use kickit::{
+  console::Colour, console::{ReturnError, HandleError},
+  init::{init_console::{Error, ErrorTrace, ErrorResult, Result, StdResult, status, stall},
+            service::Service, TARGET},
+  oncelock};
+
+trait StartService
+{
+  fn start(self) -> Result<()>;
+}
+
+impl StartService for Service
+{
+  #[inline]
+  fn start(mut self) -> Result<()>
+  {
+    use kickit::{init::service::Pattern::Standard, state};
+
+    status!("Starting service: {}", self.name);
+
+    // Don't continue starting services if we are stalled
+    if (!state!().is_ok())
+    {
+      stall!();
+    }
+
+    if let Err(trace) = self.up()
+    {
+      // If this service is optional we only need to warn not abort
+      if (self.optional)
+      {
+        trace.warn();
+      }
+      else {
+        return Err(trace)
+      }
+    }
+    else if (self.pattern == Standard)
+    {
+      // Spawn the service watcher on another thread
+      tokio::task::spawn(async move { self.watch().handle() });
+    }
+
+    Ok(())
+  }
+}
 
 /**
   * # Errors
@@ -17,15 +59,16 @@ use kickit::{console::Colour, console::{ReturnError, HandleKTError},
   * - if not ran as root user,
   * - if not ran as the init process (pid 1)
  **/
-#[inline] fn sanity(sideInit: bool) -> Result<(), KTError>
+#[inline]
+fn sanity(sideInit: bool) -> StdResult<(), Error>
 {
   use kickit::{console::affirm, init::init_console::warn};
 
   // If /run/kickit is already there then another kickit is running
-  affirm!(fs::metadata("/run/kickit").is_err(), KTError::AlreadyRunning);
+  affirm!(fs::metadata("/run/kickit").is_err(), Error::AlreadyRunning);
 
   // Make sure we are running as the root user
-  affirm!(getuid().is_root(), KTError::NotRoot);
+  affirm!(getuid().is_root(), Error::NotRoot);
 
   if (!sideInit)
   {
@@ -34,7 +77,7 @@ use kickit::{console::Colour, console::{ReturnError, HandleKTError},
       warn!("Bypassing init checks!");
     }
     else {
-      affirm!(process::id() == 1, KTError::NotInit);
+      affirm!(process::id() == 1, Error::NotInit);
     }
   }
 
@@ -55,75 +98,85 @@ use kickit::{console::Colour, console::{ReturnError, HandleKTError},
  * |
  * └── io.Core     -> The socket that ktctl uses to gather info like state, version & target
  */
-#[inline] fn setupRunFs(services: &Vec<String>, debugDump: bool) -> Result<(), KTErrorTrace>
+#[inline]
+fn setupRunFs(services: &Vec<String>, debugDump: bool) -> Result<()>
 {
   use std::{fs::Permissions, os::unix::fs::{symlink, PermissionsExt}};
   use kickit::path;
 
-  if !(cfg!(debug_assertions) || debugDump)
+  if (!debugDump)
   {
     // Normal behaviour - create runfs as a folder
-    fs::create_dir("/run/kickit").trace(KTError::RunFsFail)?;
+    fs::create_dir("/run/kickit").trace(Error::RunFsFail)?;
   }
   // A debug dump will create a folder in /var/log/kickit and symlink it to the runfs
-  else if (debugDump)
+  else if (cfg!(debug_assertions) && debugDump)
   {
     use std::{time::{SystemTime, UNIX_EPOCH}, fs};
 
     // Use the timestamp as an identifier for said folder
-    let time = SystemTime::now().duration_since(UNIX_EPOCH).trace(KTError::Unknown)?.as_millis()
+    let time = SystemTime::now().duration_since(UNIX_EPOCH).trace(Error::Unknown)?
+                  .as_millis()
                   .to_string();
 
-    let dumpDir = path!("/var/log/kickit", time);
+    let dumpDir = path!("/var/lib/kickit", time);
 
     // Recursively create our dump directory
-    fs::create_dir_all(&dumpDir).trace(KTError::RunFsFail)?;
+    fs::create_dir_all(&dumpDir).trace(Error::RunFsFail)?;
 
     // Create a symlink so it acts as if it is a directory
-    //symlink(dumpDir, PathBuf::from("/run/kickit")).trace(KTError::RunFsFail)?;
-    symlink(dumpDir, PathBuf::from("/run/kickit")).trace(KTError::RunFsFail)?;
+    //symlink(dumpDir, PathBuf::from("/run/kickit")).trace(Error::RunFsFail)?;
+    symlink(dumpDir, PathBuf::from("/run/kickit")).trace(Error::RunFsFail)?;
   }
 
-  fs::create_dir("/run/kickit/service").trace(KTError::RunFsFail)?;
-  fs::create_dir("/run/kickit/private").trace(KTError::RunFsFail)?;
+  fs::create_dir("/run/kickit/service").trace(Error::RunFsFail)?;
+  fs::create_dir("/run/kickit/private").trace(Error::RunFsFail)?;
 
   // Make the private folder, well, private
-  fs::set_permissions("/run/kickit/private", Permissions::from_mode(0o600))
-    .trace(KTError::RunFsFail)?;
+  fs::set_permissions("/run/kickit/private", Permissions::from_mode(0o600)).trace(Error::RunFsFail)?;
 
   for upService in (services)
   {
-    fs::create_dir(path!("/run/kickit/service", upService)).trace(KTError::RunFsFail)?;
+    fs::create_dir(path!("/run/kickit/service", upService)).trace(Error::RunFsFail)?;
   }
 
   Ok(())
 }
 
-#[inline] fn mountSysFilesystems() -> Result<(), KTErrorTrace>
+#[inline]
+fn mountSysFilesystems() -> Result<()>
 {
-  use kickit::init::mount::{MountFlag::{NoSuid, NoDev, NoExec},
-                            mount, unmount, mounted, mountflags, mountopts};
+  use kickit::init::mount::{
+          Flag::{NoSuid, NoDev, NoExec, Remount, Private},
+          mount, unmount, mounted, mountflags as flags};
 
-  macro_rules! mounter
+  macro_rules! mount
   {
-    ($from: tt, $to: tt, $fsType: tt, $flags: expr, $opts: expr) =>
+    ($from: tt, $to: tt, $fsType: tt, $flags: expr) =>
     {
       // Check if each destination is already mounted, and if so unmount it
-      if !(mounted($to)? && unmount($to).is_err()) { mount($from, $to, $fsType, $flags, &$opts)? }
+      if !(mounted($to)? && unmount($to).is_err())
+      {
+        mount(Some($from), $to, Some($fsType), $flags, None)?
+      }
     }
   }
 
-  mounter!("proc", "/proc", "proc", mountflags!(NoSuid, NoDev, NoExec), mountopts!());
-  mounter!("sysfs", "/sys", "sysfs", mountflags!(NoSuid, NoDev, NoExec), mountopts!());
-  mounter!("dev", "/dev", "devtmpfs", mountflags!(NoSuid), mountopts!());
-  mounter!("tmpfs", "/run", "tmpfs", mountflags!(NoSuid), mountopts!());
+  mount!("proc", "/proc", "proc", flags![NoSuid, NoDev, NoExec]);
+  mount!("sysfs", "/sys", "sysfs", flags![NoSuid, NoDev, NoExec]);
+  mount!("dev", "/dev", "devtmpfs", flags![NoSuid]);
+  mount!("tmpfs", "/run", "tmpfs", flags![NoSuid]);
+  mount!("tmpfs", "/tmp", "tmpfs", flags![NoSuid, NoDev/*, NoExec*/]);
+  // Remount the rootfs as read-write if booted with `ro` cmdline argument
+  mount(None, "/", None, flags![Private, Remount], None)?;
 
   // No errors yippie
   Ok(())
 }
 
 // Ran before starting to catch any potential early errors in a service config
-#[inline] fn initServices(services: &Vec<String>) -> Result<Vec<Service>, KTErrorTrace>
+#[inline]
+fn initServices(services: &Vec<String>) -> Result<Vec<Service>>
 {
   let mut initServices: Vec<Service> = Vec::new();
 
@@ -135,89 +188,36 @@ use kickit::{console::Colour, console::{ReturnError, HandleKTError},
   Ok(initServices)
 }
 
-#[inline] fn startService(mut service: Service) -> Result<(), KTErrorTrace>
-{
-  use kickit::{init::service::Pattern::Standard, state};
-
-  status!("Starting service: {}", service.name);
-
-  // Don't continue starting services if we are stalled
-  if (!state!().is_ok())
-  {
-    stall!();
-  }
-
-  if let Err(trace) = service.up()
-  {
-    // If this service is optional we only need to warn not abort
-    if (service.optional) { trace.warn(); } else { return Err(trace) }
-  }
-  else if (service.pattern == Standard)
-  {
-    // Spawn the service watcher on another thread
-    task::spawn(async move { service.watch().handle() });
-  }
-
-  Ok(())
-}
-
-fn watchPowerLevel() -> !
-{
-  use kickit::init::{PowerLevel, POWER_LEVEL};
-  use nix::sys::reboot::{reboot, RebootMode};
-  use std::{thread, time::Duration};
-
-  let mode = loop
-  {
-    // Repeat this loop every half a second to prevent using too many CPU cycles
-    thread::sleep(Duration::from_millis(500));
-
-    match (POWER_LEVEL.get())
-    {
-      Some(&PowerLevel::Off) => break RebootMode::RB_HALT_SYSTEM,
-      Some(&PowerLevel::Reboot) => break RebootMode::RB_AUTOBOOT,
-      // No power signal was found, move on
-      None => ()
-    }
-  };
-
-  /* for service in (UP_SERVICES.get().unwrap())
-  {
-    // Wait for each of the services to stop
-    while (Service::is_up(service)) {}
-  } */
-
-  /*
-   * This will never ever return unless an error occurrs so we will
-   * unwrap this & handle it
-   */
-  reboot(mode).trace(KTError::Shutdown).unwrap_err().fatal();
-}
-
 macro_rules! socks
 {
-  ($($sock: path),*) =>
+  ($runtime: expr, $($sock: path),*) =>
   {
     {
       $(
-        tokio::task::spawn(async move
+        // Enter the scope of the runtime, allows us to use `tokio::spawn`
+        let _guard = $runtime.handle().enter();
+
+        tokio::spawn(async move
         {
-          $sock.start().await.handle();
+          $sock.open_sock().await.handle();
         });
       )*
     }
   };
 }
 
-#[tokio::main] async fn main()
+#[tokio::main]
+async fn main()
 {
   use std::{thread, time::Duration, env};
+  use tokio::runtime::Runtime as AsyncRuntime;
+  use kickit::{init::{target, cmdlineParam}, socket, socket::Open};
 
-  use kickit::{init::{target, target::TARGET_NAME, cmdlineParam, service}, socket, socket::Start};
+  let rt: AsyncRuntime = AsyncRuntime::new().trace(Error::Unknown).handle();
 
   let sysArgs: Vec<String> = env::args().collect();
   // Run alongside another init e.g. openrc or runit
-  let noInit = (sysArgs.len() > 1 && &sysArgs[1] as &str == "--no-init");
+  let noInit = sysArgs.len() > 1 && &sysArgs[1] == "--no-init";
 
   sanity(noInit).handle();
 
@@ -230,22 +230,29 @@ macro_rules! socks
   }
   else {
     // If 'init.target=X' exists in cmdline, use X as our target, if not use system (the default)
-    if let Ok(Some(c)) = (cmdlineParam("init.target")) { &c.clone() as &str } else { "system" }
+    if let Ok(Some(c)) = (cmdlineParam("init.target"))
+    {
+      &c.clone() as &str
+    }
+    else {
+      "system"
+    }
   };
 
   status!("Target: {targetName}");
-  let target = target::source(String::from(targetName)).handle();
+  /*
+   * By having our target in a OnceLock we ensure that others parts of the init
+   * can access it hassle-free for e.g. logging or services
+   */
+  oncelock! { let TARGET = target::source(String::from(targetName)).handle() }.handle();
 
-  letOnceLock! { let TARGET_NAME = String::from(targetName) }.handle();
+  let Some(target) = TARGET.get()
+  else {
+    Err(ErrorTrace::new(Error::Unknown, "target is inaccessible")).handle()
+  };
 
   status!("Initialising services");
   let ktServices = initServices(&target.services).handle();
-
-  letOnceLock!
-  {
-    let SERVICE_HANDLES = ktServices.iter().map(std::convert::Into::into).collect()
-  }
-    .handle();
 
   // If we are running alongside another init these things should've already been done
   if (!noInit)
@@ -254,26 +261,22 @@ macro_rules! socks
     mountSysFilesystems().handle();
 
     status!("Setting hostname");
-
-    let mut hostname = File::create("/proc/sys/kernel/hostname").trace(KTError::Unknown).handle();
-    hostname.write_all(target.hostname.as_bytes()).trace(KTError::Unknown).handle();
+    let mut hostname = File::create("/proc/sys/kernel/hostname").trace(Error::Unknown).handle();
+    hostname.write_all(target.hostname.as_bytes()).trace(
+    Error::Unknown).handle();
   }
 
   status!("Setting up work directory");
   setupRunFs(&target.services, target.debugDump).handle();
 
   // Open our sockets
-  socks!(socket::Core, socket::Log, socket::Power, service::Socket);
+  socks!(rt, socket::Core, socket::Log, socket::Power);
 
   // Startup our services & wait for it to finish
   for service in (ktServices)
   {
-    startService(service).handle();
+    StartService::start(service).handle();
   }
-
-  letOnceLock! { let UP_SERVICES = target.services }.handle();
-
-  tokio::task::spawn(async move { watchPowerLevel() });
 
   thread::sleep(Duration::new(u64::MAX, 0));
 }

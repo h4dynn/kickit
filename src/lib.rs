@@ -5,7 +5,7 @@
 #![allow(unused_parens)]
 #![allow(non_snake_case)]
 
-extern crate zstd;
+extern crate ruzstd;
 extern crate thiserror;
 
 pub mod init;
@@ -148,7 +148,7 @@ pub const PRETTY_VERSION: fn() -> String = ||
   {
     $(impl std::fmt::Display for $what
     {
-      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error>
+      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
       {
         // Access all variants of the enum
         use $what::*;
@@ -274,7 +274,7 @@ pub const PRETTY_VERSION: fn() -> String = ||
  * ```
  *   use std::sync::OnceLock;
  *   use nix::unistd::getuid;
- *   use crate::{letOnceLock, console::HandleKTError};
+ *   use crate::{letOnceLock, console::HandleError};
  *
  *   const USER_ID: OnceLock<u32> = OnceLock::new();
  *
@@ -285,7 +285,7 @@ pub const PRETTY_VERSION: fn() -> String = ||
  *   }
  * ```
  */
-#[macro_export] macro_rules! letOnceLock
+#[macro_export] macro_rules! oncelock
 {
   { let $oncelock: path = $val: expr } =>
   {
@@ -295,11 +295,11 @@ pub const PRETTY_VERSION: fn() -> String = ||
      */
     if ($oncelock.get().is_some())
     {
-      Err(KTErrorTrace::new(KTError::Unknown, "OnceLock already has a value!"))
+      Err(ErrorTrace::new(Error::Unknown, "OnceLock already has a value!"))
     }
     else if ($oncelock.set($val).is_err())
     {
-      Err(KTErrorTrace::new(KTError::Unknown, "Failed to set a OnceLock!"))
+      Err(ErrorTrace::new(Error::Unknown, "Failed to set a OnceLock!"))
     }
     else {
       Ok(())

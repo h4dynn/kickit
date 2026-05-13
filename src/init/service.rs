@@ -1,10 +1,11 @@
 //! Service implementation
 
-use std::{fs, process::{Command, Stdio, Child}, path::PathBuf,
-          os::unix::net::UnixStream as Stream, sync::{Arc, OnceLock}};
+use std::{fs, process::{Command, Stdio, Child}, sync::OnceLock, path::PathBuf};
+use serde::Deserialize;
+use crate::{init::init_console::{Error, ErrorTrace, ErrorResult, Result},
+      console::affirm, file_path, path};
 
-use crate::{init::init_console::{KTError, KTErrorTrace, KTErrorResult},
-            console::affirm, file_path, path, socket::KTSocket, Data};
+pub static UP_SERVICES: OnceLock<Vec<&str>> = OnceLock::new();
 
 // The service body which is generated from the init() method
 #[derive(Debug)]
@@ -22,31 +23,32 @@ pub struct Service
   //state: State,
   up: bool,
   process: Option<Child>,
-  log: Arc<Logger>
+  log: OnceLock<Logger>
 }
 
-#[derive(PartialEq, Eq, Clone, Debug)]
-pub struct Logger { line: usize, contents: Data }
-
-#[derive(PartialEq, Eq, Clone, Debug)]
-pub struct Socket;
-
-#[derive(PartialEq, Eq, Clone, Debug)]
-pub struct SocketHandle
+#[derive(Debug)]
+pub struct Logger
 {
-  name: String,
-  log: Arc<Logger>
+  // The current line count
+  line: usize,
+  // Matching log file
+  file: fs::File
 }
 
 /*
  * Standard -> Service runs in background (on another thread), monitored by kickit,
  * RunOnce  -> Service runs on the same thread as kickit, will not continue until it exits
  */
-#[derive(serde::Deserialize, PartialEq, Eq, Clone, Copy, Debug, Default)]
-pub enum Pattern { #[default] Standard, RunOnce }
+#[derive(Deserialize, PartialEq, Eq, Clone, Copy, Debug, Default)]
+pub enum Pattern
+{
+  #[default]
+  Standard,
+  RunOnce
+}
 
 // This is used when toml::from_str() sources the service's configuration
-#[derive(serde::Deserialize, PartialEq, Eq, Clone, Debug)]
+#[derive(Deserialize, PartialEq, Eq, Clone, Debug)]
 struct Config
 {
   description: Option<String>,
@@ -58,147 +60,63 @@ struct Config
 
 // Used to locate which path we want to find (e.g. exited = /run/kickit/service/S/exited)
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum Path { Exited, Pid }
+enum Path
+{
+  Exited,
+  Pid
+}
 
 trait FindPath
 {
-  fn path(&self, which: Path) -> Result<PathBuf, KTErrorTrace>;
+  fn path(&self, which: Path) -> Result<PathBuf>;
 }
 
-// An index that may fail - has to be called via `.try_index()`
-trait TryIndex<Idx: ?Sized>
+impl Logger
 {
-  type Output: ?Sized;
-  fn try_index(&self, index: Idx) -> Option<&Self::Output>;
-}
-
-pub static SERVICE_HANDLES: OnceLock<Vec<SocketHandle>> = OnceLock::new();
-
-impl Default for Logger
-{
-  fn default() -> Self
+  #[must_use]
+  pub const fn new(file: fs::File) -> Self
   {
-    // An empty zstd file, in hex bytes, created from /dev/null (`$ zstd -1c < /dev/null | xxd`)
-    let EMPTY_ZSTD = crate::hex_data("28b52ffd240001000099e9d851").unwrap();
-
-    Self { line: 0, contents: EMPTY_ZSTD }
+    Self { line: 0, file }
   }
-}
-
-impl From<&Service> for SocketHandle
-{
-  fn from(service: &Service) -> Self
-  {
-    Self { name: service.name.clone(), log: Arc::clone(&service.log) }
-  }
-}
-
-impl TryIndex<&str> for Vec<SocketHandle>
-{
-  type Output = SocketHandle;
-
-  fn try_index(&self, candName: &str) -> Option<&SocketHandle>
-  {
-    for handle in (self)
-    {
-      if (&handle.name as &str == candName)
-      {
-        return Some(handle)
-      }
-    }
-    None
-  }
-}
-
-impl KTSocket for Socket
-{
-  fn name(&self) -> String { String::from("Service") }
-
-  async fn handler(&self, mut stream: Stream)
-  {
-    use std::io::Write;
-    use crate::{console::HandleKTError, socket::StreamBytes};
-
-    // To avoid repeating the same bytes & stream
-    macro_rules! fail
-    {
-      () =>
-      {
-        $crate::socket::fail!(stream, Default);
-      };
-    }
-
-    let Some(input) = stream.stream_bytes_eol() else { fail!(); };
-    let Ok(name) = String::from_utf8(input[1..].to_vec()) else { fail!(); };
-
-    match (input[0])
-    {
-      Self::LOG =>
-      {
-        let mut handle: SocketHandle =
-        {
-          /*
-           * SERVICE_HANDLES is a OnceLock, so we get the inner value of it
-           * or panic if it is unset (which it shouldn't be!), then since this
-           * is a vector of ServiceHandles we try to index the service name
-           * that we want from the vector, and if it is found return that
-           * handle but clone it so we can make the handle mutable
-           * ...complicating right? maybe this needs to be improved on
-           */
-          if let Some(handle) = SERVICE_HANDLES.get().unwrap().try_index(&name as &str)
-          {
-            handle.clone()
-          }
-          else {
-            fail!();
-          }
-        };
-        stream.write_all(&Arc::make_mut(&mut handle.log).contents)
-      },
-      _ => stream.write_all(&[0x0f])
-    }
-      .trace(KTError::Socket).or_warn();
-
-    Self::shutdown(stream).or_warn();
-  }
-}
-
-impl Socket
-{
-  pub const LOG: u8 = 0x3C;
 }
 
 impl Service
 {
-  ///
-  /// # Errors
-  /// * Service's configuration doesn't exist or can't be read
-  /// * Service's configuration couldn't be parsed by toml
-  /// * Service's provided executable doesn't exist
-  ///
-  /// Source the service and nothing else
-  pub fn init(name: &str) -> Result<Self, KTErrorTrace>
+  /**
+    * # Errors
+    * * Service's configuration doesn't exist or can't be read
+    * * Service's configuration couldn't be parsed by toml
+    * * Service's provided executable doesn't exist
+    */
+  // Source the service and nothing else
+  pub fn init(name: &str) -> Result<Self>
   {
     macro_rules! set
     {
-      ($config: tt, $($set: tt),*) => { $(let $set = $config.$set.unwrap_or_default();)* }
+      ($config: tt, $($set: tt),*) =>
+      {
+        $(
+          // Look for the requested value in the configuration or use the default
+          let $set = $config.$set.unwrap_or_default();
+        )*
+      };
     }
 
     let path = file_path!(path!(crate::PREFIX, "service"), name, "toml");
 
     // Check the service config exists and is a file
     affirm!(path.is_file(),
-            KTErrorTrace::new(KTError::FileNotFound, &format!("{name}: Service not found")));
+            ErrorTrace::new(Error::FileNotFound, &format!("{name}: Service not found")));
 
     // Read TOML configuration contents
-    let toml = fs::read_to_string(path).context_trace(name, KTError::ServiceParse)?;
+    let toml = fs::read_to_string(path).context_trace(name, Error::ServiceParse)?;
 
     // Source the configuration
-    let config: Config = toml::from_str(&toml).context_trace(name, KTError::ServiceParse)?;
+    let config: Config = toml::from_str(&toml).context_trace(name, Error::ServiceParse)?;
 
     // Check the service's executable actually exists on filesystem
     affirm!(fs::metadata(&config.exec[0]).is_ok(),
-      KTErrorTrace::new(KTError::FileNotFound, &format!("Service executable missing: {name}")));
+      ErrorTrace::new(Error::FileNotFound, &format!("Service executable missing: {name}")));
 
     // Optional values: fallback to default if not provided (optional & shout are false)
     set!(config, description, optional, shout, pattern);
@@ -207,27 +125,38 @@ impl Service
     {
       name: name.into(), description, optional, shout,
       pattern, exec: config.exec, up: false, process: None,
-      log: Arc::new(Logger::default())
+      log: OnceLock::new()
     })
   }
 
-  ///
-  /// # Errors
-  /// * Service is already running
-  /// * Couldn't spawn or start a process for the service
-  ///
-  #[inline] pub fn up(&mut self) -> Result<(), KTErrorTrace>
+  /**
+    * # Errors
+    * * Service is already running
+    * * Couldn't spawn or start a process for the service
+    */
+  #[inline]
+  pub fn up(&mut self) -> Result<()>
   {
-    use std::{fs::File, io::Write};
+    use std::{fs::File, io::{Write, Cursor, copy}};
 
-    affirm!(!self.up,
-      KTErrorTrace::with_context(KTError::ServiceUp, &self.name, "already up"));
-
-    // Leave marker that we at least tried to start it
-    self.log(&format!("Starting service: {}", &self.name) as &str, true)?;
+    affirm!(!self.up, ErrorTrace::with_context(Error::ServiceUp, &self.name, "already up"));
 
     // Our arguments for the executable
-    let args = if (self.exec.len() == 1) { &Vec::new() } else { &self.exec[1..] };
+    let args =
+    {
+      if (self.exec.len() == 1)
+      {
+        &Vec::new()
+      }
+      else {
+        &self.exec[1..]
+      }
+    };
+
+    // Create the empty log file
+    let mut logFile = File::options().read(true).write(true).create_new(true)
+                        .open(path!("/run/kickit/service", &self.name, "log"))
+                        .context_trace(&self.name, Error::RunFsFail)?;
 
     /*
      * Based on the service's pattern we either spawn it in the background
@@ -237,50 +166,54 @@ impl Service
     {
       Pattern::Standard =>
       {
+        // An empty zstd file, created from /dev/null (`$ zstd -1c < /dev/null | xxd`)
+        const EMPTY_ZSTD: [u8; 13] = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01,
+                                      0x00, 0x00, 0x99, 0xe9, 0xd8, 0x51];
+
         // Spawn the process in the background asynchronous to the program
         let process = Command::new(&self.exec[0]).args(args).stderr(Stdio::piped()).spawn()
-                                  .context_trace(&self.name, KTError::ServiceUp)?;
+                                  .context_trace(&self.name, Error::ServiceUp)?;
 
         // Where our pid info is stored
-        let mut pidFile = File::create(path!("/run/kickit/service", &self.name, "pid"))
-                                  .trace(KTError::RunFsFail)?;
+        let mut pidFile = File::create_new(path!("/run/kickit/service", &self.name, "pid"))
+                                  .trace(Error::RunFsFail)?;
+
+        /*
+         * The log file is going to be decompressed later on to view its contents,
+         * the decompressor will fail if the file is empty so this provides some
+         * valid but empty zstd data
+         */
+        logFile.write_all(&EMPTY_ZSTD).trace(Error::RunFsFail)?;
+
         // Write the PID in text
-        pidFile.write_all(process.id().to_string().as_bytes()).trace(KTError::RunFsFail)?;
+        pidFile.write_all(process.id().to_string().as_bytes()).trace(Error::RunFsFail)?;
         // Transfer the process to our service
         self.process = Some(process);
+
+        if (self.log.set(Logger::new(logFile)).is_err())
+        {
+          return Err(ErrorTrace::new(Error::Unknown, &format!("Failed to set logger for {}", self.name)))
+        }
+
+        self.log("Started service", true)?;
       },
       Pattern::RunOnce =>
       {
         // Start the service's process & wait for it to finish
         let process = Command::new(&self.exec[0]).args(args).stderr(Stdio::piped()).output()
-                                  .context_trace(&self.name, KTError::ServiceUp)?;
+                                  .context_trace(&self.name, Error::ServiceUp)?;
 
-        // Read the process's stderr contents
-        let log = String::from_utf8(process.stderr).trace(KTError::Format)?;
-
-        for line in (log.trim_end_matches('\n').split('\n'))
-        {
-          // Add a line to the logfile
-          self.log(line, false)?;
-        }
+        copy(&mut Cursor::new(process.stderr), &mut logFile).trace(Error::RunFsFail)?;
 
         // Service's process failed on non-zero code
         if (!process.status.success())
         {
-          /* return Err(if let Some(last) = &self.log.last
-          {
-            KTErrorTrace::with_context(KTError::ServiceUp, &self.name, last)
-          }
-          else {
-            KTErrorTrace::new(KTError::ServiceUp, &self.name)
-          }) */
-          return Err(KTErrorTrace::new(KTError::ServiceUp, &self.name))
+          return Err(ErrorTrace::new(Error::ServiceUp, &self.name))
         }
 
-        File::create(FindPath::path(self, Path::Exited)?).trace(KTError::RunFsFail)?;
+        File::create_new(FindPath::path(self, Path::Exited)?).trace(Error::RunFsFail)?;
 
         // done!!!!!!!!!!!!!!!!!!!!!!!!!
-        self.log(&format!("Service finished: {}", self.name) as &str, true)?;
       }
     }
 
@@ -290,41 +223,42 @@ impl Service
     Ok(())
   }
 
-  ///
-  /// # Errors
-  /// * Service isn't running already
-  /// * Service has a `RunOnce pattern` (no process to kill)
-  /// * Couldn't kill the service's process
-  ///
-  /// # Panics
-  /// * Service doesn't have a matching process (should have since its up)
-  ///
-  #[inline] pub fn down(&mut self) -> Result<(), KTErrorTrace>
+  /**
+    * # Errors
+    * * Service isn't running already
+    * * Service has a `RunOnce pattern` (no process to kill)
+    * * Couldn't kill the service's process
+    *
+    * # Panics
+    * * Service doesn't have a matching process (should have since its up)
+    */
+  #[inline]
+  pub(crate) fn down(&mut self) -> Result<()>
   {
     use crate::init::{init_console::status, service::Pattern::RunOnce};
 
     affirm!(self.up,
-      KTErrorTrace::with_context(KTError::ServiceDown, &self.name, "Already down"));
+      ErrorTrace::with_context(Error::ServiceDown, &self.name, "Already down"));
 
     affirm!(self.pattern != RunOnce,
-      KTErrorTrace::with_context(KTError::ServiceDown, &self.name, "Has a RunOnce pattern"));
+      ErrorTrace::with_context(Error::ServiceDown, &self.name, "Has a RunOnce pattern"));
 
     status!("Killing service: {}", &self.name);
     // Kill the process's main process & by extension all its subprocesses
-    self.process.as_mut().unwrap().kill().context_trace(&self.name, KTError::ServiceDown)?;
+    self.process.as_mut().unwrap().kill().context_trace(&self.name, Error::ServiceDown)?;
 
-    self.log(&format!("Fossilised service: {}", self.name) as &str, true)?;
+    self.log(&format!("Fossilised service: {}", self.name), true)?;
     // Process was successfully killed
     self.up = false;
 
     Ok(())
   }
 
-  ///
-  /// # Errors
-  /// * Failed to read bytes from the service log
-  /// * Service was killed or turned into a zombie
-  ///
+  /**
+    * # Errors
+    * * Failed to read bytes from the service log
+    * * Service was killed or turned into a zombie
+    */
   /*
    * Watch the service in the background and do 3 things:
    *
@@ -332,9 +266,9 @@ impl Service
    * 2) Read its logs and report them,
    * 3) Wait for a power signal & stop the service if one is given
    */
-  pub fn watch(&mut self) -> Result<(), KTErrorTrace>
+  pub fn watch(&mut self) -> Result<()>
   {
-    use std::io::{BufReader, Read};
+    use std::io::{Read, BufReader};
     use crate::state::state;
 
     loop {
@@ -351,14 +285,20 @@ impl Service
         // Push the single byte we read
         log.push(tester[0] as char);
 
-        // Create new BufReader for the stderr and loop through the bytes
-        for wrapped in (BufReader::new(out).bytes())
+        /*
+         * We use a BufReader here since its more efficient to do so
+         * (thanks clippy!)
+         */
+        for maybeByte in (BufReader::new(out).bytes())
         {
-          // Panic if byte is None (should never be)
-          let byte = wrapped.context_trace(&self.name, KTError::ServiceLog)?;
+          // Panic if byte is Err (should never be)
+          let byte = maybeByte.context_trace(&self.name, Error::ServiceLog)?;
 
           // This is our EOF- we know to stop reading bytes here
-          if (byte == b'\n') { break }
+          if (byte == b'\n')
+          {
+            break
+          }
 
           log.push(byte as char);
         }
@@ -369,13 +309,6 @@ impl Service
           self.log(logLine, false)?;
         }
       }
-
-      // TO-DO: implement this properly as sometimes it will hang forever
-      /* if (crate::init::POWER_LEVEL.get().is_some())
-      {
-        self.down()?;
-        return Ok(())
-      } */
 
       if (state!().is_ok())
       {
@@ -389,56 +322,71 @@ impl Service
     }
   }
 
-  /// Append a new line to the log
-  ///
-  /// # Errors
-  /// * Couldn't open the service's logfile
-  /// * Couldn't compress or decompress the service's logfile
-  /// * Couldn't open a lock on the file (or unlock)
-  /// * Couldn't write to the logfile
-  ///
-  /// # Panics
-  /// * More than one line was provided to the function
-  ///
-  fn log(&mut self, new: &str, fromInit: bool) -> Result<(), KTErrorTrace>
+  /**
+    * Append a new line to the log
+    *
+    * # Errors
+    * * Couldn't open the service's logfile
+    * * Couldn't compress or decompress the service's logfile
+    * * Couldn't open a lock on the file (or unlock)
+    * * Couldn't write to the logfile
+    *
+    * # Panics
+    * * More than one line was provided to the function
+    */
+  pub fn log(&mut self, new: &str, fromInit: bool) -> Result<()>
   {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{io::{Read, Seek, Cursor}, time::{SystemTime, UNIX_EPOCH}};
     use crate::{state::state, init::init_console::{Marker::Service as Mark, log}, console::Colour};
-    use zstd::bulk::decompress as zstdDecompress;
-    use zstd::bulk::compress as zstdCompress;
+    use ruzstd::{decoding::StreamingDecoder, encoding::{compress, CompressionLevel}};
 
-    // Make a mutable reference we can modify the service log with
-    let logger = Arc::make_mut(&mut self.log);
+    let log = self.log.get_mut().ok_or(ErrorTrace::new(Error::Unknown, "Log uninitialised!"))?;
 
     // Don't send empty lines if they are found for whatever reason
-    if (new.is_empty()) { return Ok(()) }
+    if (new.is_empty())
+    {
+      return Ok(())
+    }
 
     /*
      * We cannot have more than 1 line of content, this function is designed
-     * to take a-line-at-a-time (use `for line in input.split('\n') { ... }`)
+     * to take a-line-at-a-time (use `for line in input.split('\n') { ... }`).
+     * This is a panic & not an error because it is solely down to how the
+     * program is coded, not user error
      */
     assert!(new.split('\n').count() <= 1, "log() was given more than 1 line of input!");
 
-    // Decompress the previous log contents
-    let mut newLogContents = zstdDecompress(logger.contents.as_slice(), 10_000_000_000)
-                                .context_trace(&self.name, KTError::AccessLog)?;
+    /*
+     * Because this function will be called multiple times, changing the seek
+     * on the log file, we do this to ensure we are reading from the beginning
+     */
+    log.file.rewind().trace(Error::Unknown)?;
 
-    // Fancy way of saying get the current time
+    // This is the zstd decoder which wraps over the file & implements Read
+    let mut decoder = StreamingDecoder::new(&log.file).trace(Error::Unknown)?;
+    let mut contents = Vec::new();
+    // Read the decompressed log contents
+    decoder.read_to_end(&mut contents).trace(Error::AccessLog)?;
+
+    // This is to timestamp the log at the time it was received
     let timeNow = SystemTime::now().duration_since(UNIX_EPOCH)
-                                    .trace(KTError::Unknown)?
+                                    .trace(Error::Unknown)?
                                     .as_millis()
                                     .to_string();
 
     // Send timestamp to log
-    newLogContents.extend_from_slice(timeNow.as_bytes());
+    contents.extend_from_slice(timeNow.as_bytes());
 
-    // Our marker to make sure we know this message was from init, not the service
-    if (fromInit) { newLogContents.push(0x8f) }
+    // This byte is how ktctl can differentiate messages from init & service
+    if (fromInit)
+    {
+      contents.push(0x8f);
+    }
 
     // Addon the log contents
-    newLogContents.extend_from_slice(new.as_bytes());
+    contents.extend_from_slice(new.as_bytes());
     // Add a newline
-    newLogContents.push(0x0a);
+    contents.push(b'\n');
 
     /*
      * Make sure we are not stalled, because if we are we will
@@ -446,46 +394,34 @@ impl Service
      * check this message isn't from the init because if so
      * it will have already been reported once
      */
-    if (state!().is_ok() && !fromInit)
+    if (state!().is_ok() && !fromInit && self.shout)
     {
-      // Only report the message to master log if service says we should
-      if (self.shout)
+      for line in (new.split('\n'))
       {
-        for line in (new.split('\n'))
-        {
-          log!(format!("{} {}({}):{} {line}", Mark, Colour::BOLD, self.name, Colour::RESET));
-        }
+        log!(format!("{} {}({}):{} {line}", Mark, Colour::BOLD, self.name, Colour::RESET));
       }
     }
 
-    // Recompress old log contents & new contents
-    logger.contents = zstdCompress(&newLogContents, 3).trace(KTError::Unknown)?;
-    logger.line += 1;
+    /*
+     * Reading from the logfile changes the cursor position so we set it back to
+     * the beginning to overwrite the file instead of appending it
+     */
+    log.file.rewind().trace(Error::Unknown)?;
+    // Overwrite log file with new contents
+    compress(Cursor::new(contents), &mut log.file, CompressionLevel::Fastest);
+    log.line += 1;
 
     Ok(())
   }
 
-  /* pub fn is_up(name: &str) -> bool
-  {
-    use std::{fs, fs::File};
-
-    // Get the service's pid (if it exists)
-    let Ok(pid) = fs::read_to_string(path!("/run/kickit", name, "pid")) else { return false };
-
-    match (fs::read_to_string(path!("/proc", pid, "stat")))
-    {
-      Ok(stat) if (matches!(stat.split(' ').nth(2), Some("S" | "I" | "D" | "R"))) => true,
-      _ => false
-    }
-  } */
-
-  ///
-  /// # Errors
-  /// * Service was killed/zombified and isn't optional
-  /// * Service couldn't be killed gracefully (`.down()` method)
-  ///
+  /**
+    * # Errors
+    * * Service was killed/zombified and isn't optional
+    * * Service couldn't be killed gracefully (`.down()` method)
+    */
   #[doc(hidden)]
-  #[inline] fn died(&mut self) -> Result<(), KTErrorTrace>
+  #[inline]
+  fn died(&mut self) -> Result<()>
   {
     use crate::console::ReturnError;
 
@@ -498,45 +434,52 @@ impl Service
      */
     let error = if (self.shout)
     {
-      KTErrorTrace::with_context(KTError::ServiceNotRunning, &self.name, "")
+      ErrorTrace::with_context(Error::ServiceNotRunning, &self.name, "")
     }
     /* else if let Some(log) = &self.log.last
     {
-      KTErrorTrace::with_context(KTError::ServiceNotRunning, &self.name, log)
+      ErrorTrace::with_context(Error::ServiceNotRunning, &self.name, log)
     } */
     else {
-      KTErrorTrace::new(KTError::ServiceNotRunning, &self.name)
+      ErrorTrace::new(Error::ServiceNotRunning, &self.name)
     };
 
-    if (self.optional) { error.warn(); Ok(()) } else { Err(error) }
+    if (self.optional)
+    {
+      error.warn();
+      Ok(())
+    }
+    else {
+      Err(error)
+    }
   }
 
-  ///
-  /// # Errors
-  /// * Service isn't running
-  /// * Service has a `RunOnce` pattern
-  /// * Service's process couldn't be found
-  ///
-  fn pid(&self) -> Result<u32, KTErrorTrace>
+  /**
+    * # Errors
+    * * Service isn't running
+    * * Service has a `RunOnce` pattern
+    * * Service's process couldn't be found
+    */
+  fn pid(&self) -> Result<u32>
   {
     use crate::init::service::Pattern::RunOnce;
 
-    affirm!(self.up, KTErrorTrace::new(KTError::ServiceAccess,
-            "Cannot get PID: Service is not running"));
+    affirm!(self.up, ErrorTrace::new(Error::ServiceAccess, "Down"));
 
-    affirm!(self.pattern != RunOnce, KTErrorTrace::new(KTError::ServiceAccess,
+    affirm!(self.pattern != RunOnce, ErrorTrace::new(Error::ServiceAccess,
                                     "Cannot get PID: Service has an incompatible pattern"));
 
     match (&self.process)
     {
-      Some(i) => Ok(i.id()), None => Err(KTError::ServiceAccess.into())
+      Some(i) => Ok(i.id()),
+      None => Err(Error::ServiceAccess.into())
     }
   }
 }
 
 impl FindPath for Service
 {
-  fn path(&self, which: Path) -> Result<PathBuf, KTErrorTrace>
+  fn path(&self, which: Path) -> Result<PathBuf>
   {
     use Path::{Exited, Pid};
 

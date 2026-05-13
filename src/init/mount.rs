@@ -5,94 +5,120 @@ use std::fmt;
 
 // Mount flags & their corresponding bit value (MsFlags)
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub enum MountFlag { ReadOnly = 1, NoSuid = 2, NoDev = 4, NoExec = 8, Remount = 32, Bind = 4096 }
+pub enum Flag
+{
+  ReadOnly = 1,
+  NoSuid = 2,
+  NoDev = 4,
+  NoExec = 8,
+  Remount = 32,
+  Bind = 4096,
+  Private = 1 << 18
+}
 
 display_enum!
 {
-  MountFlag
+  Flag
   {
     ReadOnly => "ro", NoSuid => "nosuid", NoDev => "nodev",
-    NoExec => "noexec", Remount => "remount", Bind => "bind"
+    NoExec => "noexec", Remount => "remount", Bind => "bind",
+    Private => "private"
   }
 }
 
 // Basic type alias
-pub type MountOption = String;
+pub type Opt = String;
 
 #[derive(PartialEq, Eq, Clone, Debug, Default)]
-pub struct MountFlags { pub inner: Vec<MountFlag> }
+pub struct Flags(pub Vec<Flag>);
 
 #[derive(PartialEq, Eq, Clone, Debug, Default)]
-pub struct MountOptions { pub inner: Vec<MountOption> }
+pub struct Opts(pub Vec<Opt>);
 
-impl From<MountFlags> for nix::mount::MsFlags
+impl From<Flags> for nix::mount::MsFlags
 {
-  fn from(flags: MountFlags) -> Self
+  fn from(flags: Flags) -> Self
   {
     // The default flags are just 0 (none)
     let mut out_flags: u64 = 0;
 
-    for flag in (flags.inner)
+    for flag in (flags.0)
     {
-      // Combine the flags with the BitOr operator
-      out_flags |= flag as u64;
+      // Combine the flags
+      out_flags += flag as u64;
     }
 
     Self::from_bits_retain(out_flags)
   }
 }
 
-impl fmt::Display for MountOptions
+impl fmt::Display for Opts
 {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error>
   {
     let mut str_opts = String::new();
 
-    for option in (&self.inner)
+    for option in (&self.0)
     {
       str_opts.push_str(option);
       str_opts.push(',');
     }
 
-    write!(f, "{}", if (str_opts.is_empty()) { "" }
-    else { str_opts.strip_suffix(',').expect("MountOptions formatting error") })
+    if (!str_opts.is_empty())
+    {
+      write!(f, "{}", str_opts.strip_suffix(',').expect("Options formatting error"))?;
+    }
+    Ok(())
   }
 }
 
-impl MountFlags { pub fn push(&mut self, what: MountFlag) { self.inner.push(what) } }
-
-#[macro_export] macro_rules! mountflags
+impl Flags
 {
-  ($($flag: tt),*) =>
+  pub fn push(&mut self, flag: Flag)
+  {
+    self.0.push(flag);
+  }
+}
+
+#[macro_export]
+macro_rules! mountflags
+{
+  [$($flag: tt),*] =>
   {
     {
-      let mut mfs = $crate::init::mount::MountFlags::default();
+      use $crate::init::mount::Flags;
+      let mut flags = Flags::default();
 
-      $(mfs.inner.push($flag.into());)*
+      $(
+        flags.0.push($flag.into());
+      )*
 
-      mfs
+      flags
     }
   };
 
-  () => { MountFlags::default() };
+  [] => { Flags::default() };
 }
 pub use crate::mountflags as mountflags;
 
-#[macro_export] macro_rules! mountopts
+#[macro_export]
+macro_rules! mountopts
 {
-  ($($opt: tt),*) =>
+  [$($opt: tt),*] =>
   {
     {
-      use $crate::init::mount::MountOptions;
-      let mut opts = MountOptions::default();
+      use $crate::init::mount::Opts;
+      let mut opts = Opts::default();
 
-      $(opts.inner.push($opt.into());)*
+      $(
+        opts.0.push($opt.into());
+      )*
 
       opts
     }
   };
 
-  () => { MountOptions::default() };
+  [] => { Options::default() };
 }
 pub use crate::mountopts as mountopts;
 
@@ -102,13 +128,30 @@ pub use crate::mountopts as mountopts;
   * - Couldn't mount the device (`nix::mount::mount()` gives more info)
  **/
 // Frontend for nix library's mount function
-pub fn mount(from: &str, to: &str, fsType: &str, flags: MountFlags, opts: &MountOptions)
-  -> Result<(), crate::init::init_console::KTErrorTrace>
+pub fn mount(from: Option<&str>, to: &str, fsType: Option<&str>, flags: Flags, opts: Option<&Opts>)
+  -> Result<(), crate::init::init_console::ErrorTrace>
 {
-  use crate::init::init_console::{KTError, KTErrorResult};
+  use crate::init::init_console::{Error, ErrorResult};
 
-  nix::mount::mount(Some(from), to, Some(fsType), flags.into(), Some(&*opts.to_string()))
-    .trace(KTError::SysFsMount)?;
+  /*
+   * We have to do a manual map here because if we map like:
+   * `.map(|x| &x as &str)`
+   * ..then the compiler throws this error:
+   * "returns a value referencing data owned by the current function"
+   */
+  #[allow(clippy::manual_map)]
+  let nixOpts =
+  {
+    if let Some(realOpts) = opts
+    {
+      Some(&realOpts.to_string() as &str)
+    }
+    else {
+      None
+    }
+  };
+
+  nix::mount::mount(from, to, fsType, flags.into(), nixOpts).trace(Error::SysFsMount)?;
 
   Ok(())
 }
@@ -118,11 +161,11 @@ pub fn mount(from: &str, to: &str, fsType: &str, flags: MountFlags, opts: &Mount
   *
   * - Couldn't unmount the device
  **/
-pub fn unmount(dest: &str) -> Result<(), crate::init::init_console::KTErrorTrace>
+pub fn unmount(dest: &str) -> Result<(), crate::init::init_console::ErrorTrace>
 {
-  use crate::init::init_console::{KTError, KTErrorResult};
+  use crate::init::init_console::{Error, ErrorResult};
 
-  nix::mount::umount(dest).trace(KTError::SysFsUnmount)?;
+  nix::mount::umount(dest).trace(Error::SysFsUnmount)?;
   Ok(())
 }
 
@@ -133,13 +176,13 @@ pub fn unmount(dest: &str) -> Result<(), crate::init::init_console::KTErrorTrace
  **/
 // Check if a path is a mountpoint
 pub fn mounted<P: AsRef<std::path::Path> + std::fmt::Display>(mountpoint: P)
-  -> Result<bool, crate::init::init_console::KTErrorTrace>
+  -> Result<bool, crate::init::init_console::ErrorTrace>
 {
   use std::fs;
-  use crate::init::init_console::{KTError, KTErrorResult};
+  use crate::init::init_console::{Error, ErrorResult};
 
   // Cycle through potential matches from /proc/mounts
-  for candMount in (fs::read_to_string("/proc/mounts").trace(KTError::FileNotFound)?.split('\n'))
+  for candMount in (fs::read_to_string("/proc/mounts").trace(Error::FileNotFound)?.split('\n'))
   {
     if (candMount.split(' ').nth(1) == Some(&mountpoint.to_string()))
     {
