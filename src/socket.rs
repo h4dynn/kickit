@@ -17,49 +17,6 @@ macro_rules! socket_struct
 }
 pub use crate::socket_struct as socket_struct;
 
-/*
- * Provide a failure byte to the socket peer as a signal that something
- * went wrong (this byte is usually 0x0f), shutdown the connection &
- * then return
- */
-#[macro_export]
-macro_rules! fail
-{
-  ($stream: expr, $byte: tt) =>
-  {
-    // Write our "error byte" to signal to peer an error has occurred
-    $stream.try_write(&[$byte]).trace(Error::Socket).or_warn();
-    // Exit our function- do nothing more here
-    return
-  };
-}
-pub use crate::fail as fail;
-
-#[macro_export]
-macro_rules! stream_sanity
-{
-  ($stream: expr => Readable) =>
-  {
-    if ($stream.readable().await.is_err())
-    {
-      fail!($stream, 0x3f);
-    }
-  };
-  ($stream: expr => Writable) =>
-  {
-    if ($stream.writable().await.is_err())
-    {
-      fail!($stream, 0xe6);
-    }
-  };
-  ($stream: expr => Readable + Writable) =>
-  {
-    $crate::socket::stream_sanity!($stream => Readable);
-    $crate::socket::stream_sanity!($stream => Writable);
-  };
-}
-pub use crate::stream_sanity as stream_sanity;
-
 // The sockets- all of these will have Socket implemented
 socket_struct!
 {
@@ -74,7 +31,7 @@ pub trait Socket
    * The name we will use for the socket in runfs, which will end up
    * being /run/kickit/io.<SOCK_NAME>
    */
-  fn name(&self) -> String;
+  const NAME: &str;
 
   // Make the socket root-access only (mapped to private dir)
   const PRIVATE: bool = true;
@@ -86,11 +43,11 @@ pub trait Socket
     // These are the default paths, used except for when a custom method is defined
     if (Self::PRIVATE)
     {
-      file_path!(PathBuf::from("/run/kickit/private"), "io", self.name())
+      file_path!(PathBuf::from("/run/kickit/private"), "io", Self::NAME)
     }
     else
     {
-      file_path!(PathBuf::from("/run/kickit"), "io", self.name())
+      file_path!(PathBuf::from("/run/kickit"), "io", Self::NAME)
     }
   }
 

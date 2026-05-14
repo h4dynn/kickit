@@ -1,21 +1,61 @@
 //! Socket implementations for init
 
 use tokio::net::UnixStream;
-use crate::{socket::{Socket, Core, Log, Power, fail, stream_sanity},
+use crate::{socket::{Socket, Core, Log, Power},
             init::init_console::{Error, ErrorResult}, console::HandleError};
+
+/*
+ * Provide a failure byte to the socket peer as a signal that something
+ * went wrong (this byte is usually 0x0f), shutdown the connection &
+ * then return
+ */
+#[macro_export]
+macro_rules! fail
+{
+  ($stream: expr, $byte: tt) =>
+  {
+    // Write our "error byte" to signal to peer an error has occurred
+    $stream.try_write(&[$byte]).trace(Error::Socket).or_warn();
+    // Exit our function- do nothing more here
+    return
+  };
+}
+pub use crate::fail as fail;
+
+#[macro_export]
+macro_rules! stream_sanity
+{
+  ($stream: expr => Readable) =>
+  {
+    if ($stream.readable().await.is_err())
+    {
+      fail!($stream, 0x3f);
+    }
+  };
+  ($stream: expr => Writable) =>
+  {
+    if ($stream.writable().await.is_err())
+    {
+      fail!($stream, 0xe6);
+    }
+  };
+  ($stream: expr => Readable + Writable) =>
+  {
+    stream_sanity!($stream => Readable);
+    stream_sanity!($stream => Writable);
+  };
+}
+pub use crate::stream_sanity as stream_sanity;
 
 impl Socket for Core
 {
-  fn name(&self) -> String
-  {
-    String::from("Core")
-  }
+  const NAME: &str = "Core";
   // All users should be able to access this socket as it reports no private data
   const PRIVATE: bool = false;
 
   async fn handler(&self, stream: UnixStream)
   {
-    use crate::{state::state, init::target::TARGET_NAME};
+    use crate::{state::state, init::TARGET_NAME};
     use std::process;
 
     stream_sanity!(stream => Readable + Writable);
@@ -48,7 +88,7 @@ impl Socket for Core
           fail!(stream, 0x0f);
         }
       },
-      Self::PID => stream.try_write(&process::id().to_be_bytes()),
+      Self::PID => stream.try_write(&process::id().to_ne_bytes()),
       // Safely ignore newlines
       b'\n' => Ok(0),
       // Send an error for unknown bytes
@@ -60,10 +100,7 @@ impl Socket for Core
 
 impl Socket for Log
 {
-  fn name(&self) -> String
-  {
-    String::from("Log")
-  }
+  const NAME: &str = "Log";
 
   async fn handler(&self, stream: UnixStream)
   {
@@ -92,10 +129,7 @@ impl Socket for Log
 
 impl Socket for Power
 {
-  fn name(&self) -> String
-  {
-    String::from("Power")
-  }
+  const NAME: &str = "Power";
 
   async fn handler(&self, stream: UnixStream)
   {

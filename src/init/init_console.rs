@@ -311,19 +311,33 @@ fn kickToEmergencyShell()
   }
 }
 
-#[macro_export] macro_rules! log
+#[macro_export]
+macro_rules! log
 {
   ($new: expr) =>
   {
     {
-      eprintln!("{}", $new);
-      $crate::init::init_console::MASTER_LOG.lock().unwrap().push($new);
+      use $crate::init::{init_console::MASTER_LOG, QUIET};
+
+      // Get the oncelock or fallback to false if not already set
+      let quiet = QUIET.get().unwrap_or(&false);
+
+      dbg!(quiet);
+
+      // Don't print to console if quiet mode is enabled
+      if (!quiet)
+      {
+        eprintln!("{}", $new);
+      }
+
+      MASTER_LOG.lock().unwrap().push($new);
     }
   };
 }
 pub use crate::log as log;
 
-#[macro_export] macro_rules! stall
+#[macro_export]
+macro_rules! stall
 {
   () =>
   {
@@ -350,27 +364,27 @@ pub use crate::stall as stall;
  *
  * Output: `[*] Hello world`
  */
-#[macro_export] macro_rules! status
+#[macro_export]
+macro_rules! status
 {
   ($($message: tt)*) =>
   {
     {
-      use $crate::init::init_console::log;
-      log!(format!("{} {}", $crate::init::init_console::Marker::Status,
-                      format!($($message)*)))
+      use $crate::init::init_console::{log, Marker::Status};
+      log!(format!("{} {}", Status, format!($($message)*)))
     }
   };
 }
 pub use crate::status as status;
 
-#[macro_export] macro_rules! warn
+#[macro_export]
+macro_rules! warn
 {
   ($($message: tt)*) =>
   {
     {
-      use $crate::init::init_console::log;
-      log!(format!("{} {}{}{}", $crate::init::init_console::Marker::Warn, Colour::BOLD,
-                      format!($($message)*), Colour::RESET))
+      use $crate::init::init_console::{log, Marker::Warn};
+      log!(format!("{} {}{}{}", Warn, Colour::BOLD, format!($($message)*), Colour::RESET))
     }
   };
 }

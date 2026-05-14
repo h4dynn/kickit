@@ -4,12 +4,12 @@
 #![allow(non_snake_case)]
 
 use std::{fs, fs::File, io::Write, path::PathBuf, process};
+use tokio::task;
 use nix::unistd::getuid;
 use kickit::{
   console::Colour, console::{ReturnError, HandleError},
   init::{init_console::{Error, ErrorTrace, ErrorResult, Result, StdResult, status, stall},
-            service::Service, TARGET},
-  oncelock};
+            service::Service, TARGET, TARGET_NAME, QUIET}, oncelock};
 
 trait StartService
 {
@@ -42,10 +42,11 @@ impl StartService for Service
         return Err(trace)
       }
     }
+    // Watch the service to update logs & make sure it isn't killed
     else if (self.pattern == Standard)
     {
       // Spawn the service watcher on another thread
-      tokio::task::spawn(async move { self.watch().handle() });
+      task::spawn(async move { self.watch().handle() });
     }
 
     Ok(())
@@ -221,6 +222,9 @@ async fn main()
 
   sanity(noInit).handle();
 
+  // Respect the quiet argument if provided
+  oncelock! { let QUIET = cmdlineParam("quiet") == Ok(None) }.handle();
+
   status!("kickit {}", kickit::PRETTY_VERSION());
 
   let targetName = if (cfg!(debug_assertions))
@@ -245,11 +249,9 @@ async fn main()
    * can access it hassle-free for e.g. logging or services
    */
   oncelock! { let TARGET = target::source(String::from(targetName)).handle() }.handle();
+  oncelock! { let TARGET_NAME = targetName.to_owned() }.handle();
 
-  let Some(target) = TARGET.get()
-  else {
-    Err(ErrorTrace::new(Error::Unknown, "target is inaccessible")).handle()
-  };
+  let target = TARGET.get().ok_or(ErrorTrace::new(Error::Unknown, "target is inaccessible")).handle();
 
   status!("Initialising services");
   let ktServices = initServices(&target.services).handle();
@@ -262,8 +264,7 @@ async fn main()
 
     status!("Setting hostname");
     let mut hostname = File::create("/proc/sys/kernel/hostname").trace(Error::Unknown).handle();
-    hostname.write_all(target.hostname.as_bytes()).trace(
-    Error::Unknown).handle();
+    hostname.write_all(target.hostname.as_bytes()).trace(Error::Unknown).handle();
   }
 
   status!("Setting up work directory");

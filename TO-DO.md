@@ -6,6 +6,9 @@
 - [x] Make an io.Power socket, for user power control
       (shutdown/reboot)
 
+- [ ] Implement safe power-off/reboot (stop all services,
+      unmount filesystems, etc)
+
 - [ ] Add option to create directories in /run for
       services
 

@@ -1,6 +1,5 @@
 //! Target configuration file sourcing
 
-use std::sync::OnceLock;
 use crate::{init::init_console::Result, path, file_path};
 
 // KTTargetSource is used for toml::from_str
@@ -23,9 +22,6 @@ pub struct Target
   pub hostname: String,
   pub debugDump: bool
 }
-
-// This gets a value when the target is sourced
-pub static TARGET_NAME: OnceLock<String> = OnceLock::new();
 
 /**
   * # Errors

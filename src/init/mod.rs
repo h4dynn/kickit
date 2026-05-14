@@ -16,6 +16,9 @@ use self::init_console::{Error, ErrorTrace, Result};
 
 // Once the target is sourced its configuration will be stored here
 pub static TARGET: OnceLock<self::target::Target> = OnceLock::new();
+pub static TARGET_NAME: OnceLock<String> = OnceLock::new();
+// If set to true, master log entries won't be shown on console
+pub static QUIET: OnceLock<bool> = OnceLock::new();
 
 // The default shell will be bash unless the "posix_sh" feature is set
 pub(crate) const SHELL: &str =

@@ -28,7 +28,7 @@ impl KTSocket for Hello
    * This dictates what name our socket will be created with, so
    * in this case it would be '/run/kickit/io.Hello'
    */
-  fn name(&self) -> String { String::from("Hello") }
+  const NAME: &str = "Hello";
 
   /*
    * Limit the socket to only root-level access, the default for

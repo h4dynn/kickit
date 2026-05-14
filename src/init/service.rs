@@ -16,6 +16,7 @@ pub struct Service
   pub description: String,
   pub optional: bool,
   pub pattern: Pattern,
+  pub logger: bool,
   shout: bool,
   exec: Vec<String>,
 
@@ -32,7 +33,8 @@ pub struct Logger
   // The current line count
   line: usize,
   // Matching log file
-  file: fs::File
+  file: fs::File,
+  reader: Option<std::io::PipeReader>
 }
 
 /*
@@ -55,6 +57,7 @@ struct Config
   optional: Option<bool>,
   shout: Option<bool>,
   pattern: Option<Pattern>,
+  logger: Option<bool>,
   exec: Vec<String>
 }
 
@@ -76,7 +79,7 @@ impl Logger
   #[must_use]
   pub const fn new(file: fs::File) -> Self
   {
-    Self { line: 0, file }
+    Self { line: 0, file, reader: None }
   }
 }
 
@@ -121,11 +124,13 @@ impl Service
     // Optional values: fallback to default if not provided (optional & shout are false)
     set!(config, description, optional, shout, pattern);
 
+    let logger = config.logger.unwrap_or(true);
+
     Ok(Self
     {
       name: name.into(), description, optional, shout,
-      pattern, exec: config.exec, up: false, process: None,
-      log: OnceLock::new()
+      pattern, logger, exec: config.exec, up: false,
+      process: None, log: OnceLock::new()
     })
   }
 
@@ -137,7 +142,12 @@ impl Service
   #[inline]
   pub fn up(&mut self) -> Result<()>
   {
-    use std::{fs::File, io::{Write, Cursor, copy}};
+    use std::{fs::{File, Permissions}, os::unix::fs::PermissionsExt,
+              io::{Write, BufRead, Cursor, BufReader, pipe}};
+
+    // An empty zstd file, created from /dev/null (`$ zstd -1c < /dev/null | xxd`)
+    const EMPTY_ZSTD: [u8; 13] = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01,
+                                  0x00, 0x00, 0x99, 0xe9, 0xd8, 0x51];
 
     affirm!(!self.up, ErrorTrace::with_context(Error::ServiceUp, &self.name, "already up"));
 
@@ -153,11 +163,29 @@ impl Service
       }
     };
 
-    // Create the empty log file
-    let mut logFile = File::options().read(true).write(true).create_new(true)
-                        .open(path!("/run/kickit/service", &self.name, "log"))
-                        .context_trace(&self.name, Error::RunFsFail)?;
+    if (self.logger)
+    {
+      // Create the empty log file
+      let mut logFile = File::options().read(true).write(true).create_new(true)
+                          .open(path!("/run/kickit/service", &self.name, "log"))
+                          .context_trace(&self.name, Error::RunFsFail)?;
 
+      // Make log file inaccessible to anybody but the root user
+      logFile.set_permissions(Permissions::from_mode(0o600)).trace(Error::RunFsFail)?;
+      /*
+       * The log file is going to be decompressed later on to view its contents,
+       * the decompressor will fail if the file is empty so this provides some
+       * valid but empty zstd data
+       */
+      logFile.write_all(&EMPTY_ZSTD).trace(Error::RunFsFail)?;
+
+      if (self.log.set(Logger::new(logFile)).is_err())
+      {
+        return Err(ErrorTrace::new(Error::Unknown, &format!("Failed to set logger for {}", self.name)))
+      }
+    }
+
+    let (reader, writer) = pipe().trace(Error::Unknown)?;
     /*
      * Based on the service's pattern we either spawn it in the background
      * and watch it or run it in foreground and wait for it to finish
@@ -166,53 +194,58 @@ impl Service
     {
       Pattern::Standard =>
       {
-        // An empty zstd file, created from /dev/null (`$ zstd -1c < /dev/null | xxd`)
-        const EMPTY_ZSTD: [u8; 13] = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01,
-                                      0x00, 0x00, 0x99, 0xe9, 0xd8, 0x51];
-
         // Spawn the process in the background asynchronous to the program
-        let process = Command::new(&self.exec[0]).args(args).stderr(Stdio::piped()).spawn()
-                                  .context_trace(&self.name, Error::ServiceUp)?;
+        let process = Command::new(&self.exec[0]).args(args)
+                        .stdout(writer.try_clone().trace(Error::Unknown)?).stderr(writer).spawn()
+                        .context_trace(&self.name, Error::ServiceUp)?;
 
         // Where our pid info is stored
         let mut pidFile = File::create_new(path!("/run/kickit/service", &self.name, "pid"))
                                   .trace(Error::RunFsFail)?;
-
-        /*
-         * The log file is going to be decompressed later on to view its contents,
-         * the decompressor will fail if the file is empty so this provides some
-         * valid but empty zstd data
-         */
-        logFile.write_all(&EMPTY_ZSTD).trace(Error::RunFsFail)?;
 
         // Write the PID in text
         pidFile.write_all(process.id().to_string().as_bytes()).trace(Error::RunFsFail)?;
         // Transfer the process to our service
         self.process = Some(process);
 
-        if (self.log.set(Logger::new(logFile)).is_err())
+        if let Some(log) = self.log.get_mut()
         {
-          return Err(ErrorTrace::new(Error::Unknown, &format!("Failed to set logger for {}", self.name)))
+          log.reader = Some(reader);
+          self.log("Started service", true)?;
         }
-
-        self.log("Started service", true)?;
       },
       Pattern::RunOnce =>
       {
         // Start the service's process & wait for it to finish
         let process = Command::new(&self.exec[0]).args(args).stderr(Stdio::piped()).output()
-                                  .context_trace(&self.name, Error::ServiceUp)?;
+                        .context_trace(&self.name, Error::ServiceUp)?;
 
-        copy(&mut Cursor::new(process.stderr), &mut logFile).trace(Error::RunFsFail)?;
+        let stderr = BufReader::new(Cursor::new(process.stderr));
 
-        // Service's process failed on non-zero code
-        if (!process.status.success())
+        for maybeLine in (stderr.split(b'\n'))
         {
+          let line = maybeLine.context_trace(format!("Invalid input for {}", self.name), Error::Format)?;
+          let stringLine = String::from_utf8(line).context_trace(&self.name, Error::Format)?;
+
+          self.log(&stringLine, false)?;
+        }
+
+        // Service's process exit on 0 (success)
+        if (process.status.success())
+        {
+          self.log("Service has finished", true)?;
+        }
+        else {
           return Err(ErrorTrace::new(Error::ServiceUp, &self.name))
         }
 
         File::create_new(FindPath::path(self, Path::Exited)?).trace(Error::RunFsFail)?;
 
+        if let Some(log) = self.log.get_mut()
+        {
+          // Make logfile read-only as the process has finished
+          log.file.set_permissions(Permissions::from_mode(0o400)).trace(Error::RunFsFail)?;
+        }
         // done!!!!!!!!!!!!!!!!!!!!!!!!!
       }
     }
@@ -268,45 +301,56 @@ impl Service
    */
   pub fn watch(&mut self) -> Result<()>
   {
-    use std::io::{Read, BufReader};
+    use std::{io::{Read, BufReader}, thread::sleep, time::Duration};
     use crate::state::state;
 
     loop {
-      let mut tester = [0; 1];
-      let mut log = String::new();
-
       /*
-       * Read stderr and take one byte; if this fails then we know there
-       * is nothing to read but if it succeeds then we can read the rest
+       * Wait every 1/4th a second to check service, without this
+       * kickit would use lots of CPU %
        */
-      if let Some(ref mut process) = self.process && let Some(out) = process.stderr.as_mut() &&
-        (out.read_exact(&mut tester).is_ok())
+      sleep(Duration::from_millis(250));
+
+      if (self.logger) && let Some(logger) = self.log.get()
       {
-        // Push the single byte we read
-        log.push(tester[0] as char);
+        let mut tester = [0; 1];
+        let mut log = String::new();
+
+        let mut logReader = logger.reader
+                              .as_ref().ok_or(ErrorTrace::new(Error::Unknown, "Log reader missing!"))?;
 
         /*
-         * We use a BufReader here since its more efficient to do so
-         * (thanks clippy!)
+         * Read stderr and take one byte; if this fails then we know there
+         * is nothing to read but if it succeeds then we can read the rest
          */
-        for maybeByte in (BufReader::new(out).bytes())
+        if (logReader.read_exact(&mut tester).is_ok())
         {
-          // Panic if byte is Err (should never be)
-          let byte = maybeByte.context_trace(&self.name, Error::ServiceLog)?;
+          // Push the single byte we read
+          log.push(tester[0] as char);
 
-          // This is our EOF- we know to stop reading bytes here
-          if (byte == b'\n')
+          /*
+           * We use a BufReader here since its more efficient to do so
+           * (thanks clippy!)
+           */
+          for maybeByte in (BufReader::new(logReader).bytes())
           {
-            break
+            // Panic if byte is Err (should never be)
+            let byte = maybeByte.context_trace(&self.name, Error::ServiceLog)?;
+
+            // This is our EOF- we know to stop reading bytes here
+            if (byte == b'\n')
+            {
+              break
+            }
+
+            log.push(byte as char);
           }
 
-          log.push(byte as char);
-        }
-
-        // Sometimes our log has multiple lines so account for this here
-        for logLine in (log.split('\n'))
-        {
-          self.log(logLine, false)?;
+          // Sometimes our log has multiple lines so account for this here
+          for logLine in (log.split('\n'))
+          {
+            self.log(logLine, false)?;
+          }
         }
       }
 
@@ -340,13 +384,13 @@ impl Service
     use crate::{state::state, init::init_console::{Marker::Service as Mark, log}, console::Colour};
     use ruzstd::{decoding::StreamingDecoder, encoding::{compress, CompressionLevel}};
 
-    let log = self.log.get_mut().ok_or(ErrorTrace::new(Error::Unknown, "Log uninitialised!"))?;
-
     // Don't send empty lines if they are found for whatever reason
-    if (new.is_empty())
+    if (new.is_empty() || !self.logger)
     {
       return Ok(())
     }
+
+    let log = self.log.get_mut().ok_or(ErrorTrace::new(Error::Unknown, "Log uninitialised!"))?;
 
     /*
      * We cannot have more than 1 line of content, this function is designed
