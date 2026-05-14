@@ -348,7 +348,7 @@ impl Init
       Emergency | Down => Colour::RED, Stalled => Colour::ORANGE, Ok => Colour::GREEN
     };
 
-    let initPid = u32::from_ne_bytes(Pid.request().await?
+    let initPid = u32::from_be_bytes(Pid.request().await?
                                       .try_into()
                                       .map_err(|_| KTCtlErrorTrace::new(KTCtlError::Format, "Invalid init pid!"))?);
 
@@ -726,9 +726,17 @@ fn parseArgs(arguments: &[String]) -> Result<Operation, KTCtlErrorTrace>
 {
   use Operation::{Help, Version, TargetInfo, State, ServiceList, ServiceRestart, Log, Shutdown, Reboot};
 
-  if (arguments.len() == 1)
+  match (&arguments[0] as &str)
   {
-    return Ok(Help(None))
+    "shutdown" | "poweroff" => return Ok(Shutdown),
+    "reboot" => return Ok(Reboot),
+    _ =>
+    {
+      if (arguments.len() == 1)
+      {
+        return Ok(Help(None))
+      }
+    }
   }
 
   Ok(match (&arguments[1] as &str)

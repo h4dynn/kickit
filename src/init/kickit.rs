@@ -8,7 +8,7 @@ use tokio::task;
 use nix::unistd::getuid;
 use kickit::{
   console::Colour, console::{ReturnError, HandleError},
-  init::{init_console::{Error, ErrorTrace, ErrorResult, Result, StdResult, status, stall},
+  init::{init_console::{Error, ErrorResult, Result, StdResult, status, stall},
             service::Service, TARGET, TARGET_NAME, QUIET}, oncelock};
 
 trait StartService
@@ -108,7 +108,7 @@ fn setupRunFs(services: &Vec<String>, debugDump: bool) -> Result<()>
   if (!debugDump)
   {
     // Normal behaviour - create runfs as a folder
-    fs::create_dir("/run/kickit").trace(Error::RunFsFail)?;
+    fs::create_dir("/run/kickit").into_trace(Error::RunFsFail)?;
   }
   // A debug dump will create a folder in /var/log/kickit and symlink it to the runfs
   else if (cfg!(debug_assertions) && debugDump)
@@ -116,29 +116,29 @@ fn setupRunFs(services: &Vec<String>, debugDump: bool) -> Result<()>
     use std::{time::{SystemTime, UNIX_EPOCH}, fs};
 
     // Use the timestamp as an identifier for said folder
-    let time = SystemTime::now().duration_since(UNIX_EPOCH).trace(Error::Unknown)?
+    let time = SystemTime::now().duration_since(UNIX_EPOCH).into_trace(Error::Unknown)?
                   .as_millis()
                   .to_string();
 
     let dumpDir = path!("/var/lib/kickit", time);
 
     // Recursively create our dump directory
-    fs::create_dir_all(&dumpDir).trace(Error::RunFsFail)?;
+    fs::create_dir_all(&dumpDir).into_trace(Error::RunFsFail)?;
 
     // Create a symlink so it acts as if it is a directory
-    //symlink(dumpDir, PathBuf::from("/run/kickit")).trace(Error::RunFsFail)?;
-    symlink(dumpDir, PathBuf::from("/run/kickit")).trace(Error::RunFsFail)?;
+    //symlink(dumpDir, PathBuf::from("/run/kickit")).into_trace(Error::RunFsFail)?;
+    symlink(dumpDir, PathBuf::from("/run/kickit")).into_trace(Error::RunFsFail)?;
   }
 
-  fs::create_dir("/run/kickit/service").trace(Error::RunFsFail)?;
-  fs::create_dir("/run/kickit/private").trace(Error::RunFsFail)?;
+  fs::create_dir("/run/kickit/service").into_trace(Error::RunFsFail)?;
+  fs::create_dir("/run/kickit/private").into_trace(Error::RunFsFail)?;
 
   // Make the private folder, well, private
-  fs::set_permissions("/run/kickit/private", Permissions::from_mode(0o600)).trace(Error::RunFsFail)?;
+  fs::set_permissions("/run/kickit/private", Permissions::from_mode(0o600)).into_trace(Error::RunFsFail)?;
 
   for upService in (services)
   {
-    fs::create_dir(path!("/run/kickit/service", upService)).trace(Error::RunFsFail)?;
+    fs::create_dir(path!("/run/kickit/service", upService)).into_trace(Error::RunFsFail)?;
   }
 
   Ok(())
@@ -214,7 +214,7 @@ async fn main()
   use tokio::runtime::Runtime as AsyncRuntime;
   use kickit::{init::{target, cmdlineParam}, socket, socket::Open};
 
-  let rt: AsyncRuntime = AsyncRuntime::new().trace(Error::Unknown).handle();
+  let rt: AsyncRuntime = AsyncRuntime::new().into_trace(Error::Unknown).handle();
 
   let sysArgs: Vec<String> = env::args().collect();
   // Run alongside another init e.g. openrc or runit
@@ -251,7 +251,7 @@ async fn main()
   oncelock! { let TARGET = target::source(String::from(targetName)).handle() }.handle();
   oncelock! { let TARGET_NAME = targetName.to_owned() }.handle();
 
-  let target = TARGET.get().ok_or(ErrorTrace::new(Error::Unknown, "target is inaccessible")).handle();
+  let target = TARGET.get().ok_or(Error::Unknown.trace("target is inaccessible")).handle();
 
   status!("Initialising services");
   let ktServices = initServices(&target.services).handle();
@@ -263,8 +263,8 @@ async fn main()
     mountSysFilesystems().handle();
 
     status!("Setting hostname");
-    let mut hostname = File::create("/proc/sys/kernel/hostname").trace(Error::Unknown).handle();
-    hostname.write_all(target.hostname.as_bytes()).trace(Error::Unknown).handle();
+    let mut hostname = File::create("/proc/sys/kernel/hostname").into_trace(Error::Unknown).handle();
+    hostname.write_all(target.hostname.as_bytes()).into_trace(Error::Unknown).handle();
   }
 
   status!("Setting up work directory");

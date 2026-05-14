@@ -32,18 +32,18 @@ pub struct Target
  **/
 pub fn source(name: String) -> Result<Target>
 {
-  use crate::{init::init_console::{Error, ErrorTrace, ErrorResult}};
+  use crate::{init::init_console::{Error, ErrorResult}};
   use std::fs;
 
   // Read toml contents from target config to string
   let targetToml = fs::read_to_string(file_path!(path!(crate::PREFIX, "target"), &name, "toml"))
-                    .trace(Error::FileNotFound)?;
+                    .into_trace(Error::FileNotFound)?;
 
   // Source the configuration
-  let sourcedTarget: TargetSource = toml::from_str(&targetToml).trace(Error::TargetParse)?;
+  let sourcedTarget: TargetSource = toml::from_str(&targetToml).into_trace(Error::TargetParse)?;
 
-  let services = sourcedTarget.services.ok_or(ErrorTrace::new(Error::TargetMissingValue,
-                                                  &format!("services[] missing in {name}.toml")))?;
+  let services = sourcedTarget.services
+                    .ok_or(Error::TargetMissingValue.trace(&format!("services[] missing in {name}.toml")))?;
 
   // Set our target values or the default if not specified in sourced config
   let logLevel = sourcedTarget.log_level.unwrap_or(1);

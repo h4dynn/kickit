@@ -295,11 +295,11 @@ pub const PRETTY_VERSION: fn() -> String = ||
      */
     if ($oncelock.get().is_some())
     {
-      Err(ErrorTrace::new(Error::Unknown, "OnceLock already has a value!"))
+      Err(Error::Unknown.trace("OnceLock already has a value!"))
     }
     else if ($oncelock.set($val).is_err())
     {
-      Err(ErrorTrace::new(Error::Unknown, "Failed to set a OnceLock!"))
+      Err(Error::Unknown.trace("Failed to set a OnceLock!"))
     }
     else {
       Ok(())

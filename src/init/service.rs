@@ -2,7 +2,7 @@
 
 use std::{fs, process::{Command, Stdio, Child}, sync::OnceLock, path::PathBuf};
 use serde::Deserialize;
-use crate::{init::init_console::{Error, ErrorTrace, ErrorResult, Result},
+use crate::{init::init_console::{Error, ExtendWithContext, ErrorResult, Result},
       console::affirm, file_path, path};
 
 pub static UP_SERVICES: OnceLock<Vec<&str>> = OnceLock::new();
@@ -52,10 +52,15 @@ use State::{Up, Down};
 #[derive(Deserialize, PartialEq, Eq, Clone, Copy, Debug, Default)]
 pub enum Pattern
 {
+  // The regular-type daemon, that runs forever until shutdown
   #[default]
   Standard,
+  // Creates fork(s) of the process, kickit makes sure to not kill the service
+  Forking,
+  // Run command(s) once & then exit
   RunOnce
 }
+use Pattern::{Standard, Forking, RunOnce};
 
 // This is used when toml::from_str() sources the service's configuration
 #[derive(Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -117,17 +122,17 @@ impl Service
 
     // Check the service config exists and is a file
     affirm!(path.is_file(),
-            ErrorTrace::new(Error::FileNotFound, &format!("{name}: Service not found")));
+            Error::FileNotFound.trace(&format!("{name}: Service not found")));
 
     // Read TOML configuration contents
-    let toml = fs::read_to_string(path).context_trace(name, Error::ServiceParse)?;
+    let toml = fs::read_to_string(path).into_trace(Error::ServiceParse).context(name)?;
 
     // Source the configuration
-    let config: Config = toml::from_str(&toml).context_trace(name, Error::ServiceParse)?;
+    let config: Config = toml::from_str(&toml).into_trace(Error::ServiceParse).context(name)?;
 
     // Check the service's executable actually exists on filesystem
     affirm!(fs::metadata(&config.exec[0]).is_ok(),
-      ErrorTrace::new(Error::FileNotFound, &format!("Service executable missing: {name}")));
+      Error::FileNotFound.trace(&format!("Service executable missing: {name}")));
 
     // Optional values: fallback to default if not provided (optional & shout are false)
     set!(config, description, optional, shout, pattern);
@@ -154,15 +159,14 @@ impl Service
               io::{Write, BufRead, Cursor, BufReader, pipe}};
 
     // An empty zstd file, created from /dev/null (`$ zstd -1c < /dev/null | xxd`)
-    const EMPTY_ZSTD: [u8; 13] = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01,
-                                  0x00, 0x00, 0x99, 0xe9, 0xd8, 0x51];
+    const EMPTY_ZSTD: [u8; 13] = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01, 0x00,
+                                    0x00, 0x99, 0xe9, 0xd8, 0x51];
 
-    affirm!(self.state == Down,
-              ErrorTrace::with_context(Error::ServiceUp, &self.name, "already up"));
+    affirm!(self.state == Down, Error::ServiceUp.trace("already up").context(&self.name));
 
     // Our arguments for the executable
-    let args =
-    {
+    let args = {
+      // Check to make sure we don't index past the vector's length (causes a panic)
       if (self.exec.len() == 1)
       {
         &Vec::new()
@@ -177,43 +181,46 @@ impl Service
       // Create the empty log file
       let mut logFile = File::options().read(true).write(true).create_new(true)
                           .open(path!("/run/kickit/service", &self.name, "log"))
-                          .context_trace(&self.name, Error::RunFsFail)?;
+                          .into_trace(Error::RunFsFail).context(&self.name)?;
 
       // Make log file inaccessible to anybody but the root user
-      logFile.set_permissions(Permissions::from_mode(0o600)).trace(Error::RunFsFail)?;
+      logFile.set_permissions(Permissions::from_mode(0o600)).into_trace(Error::RunFsFail)?;
       /*
        * The log file is going to be decompressed later on to view its contents,
        * the decompressor will fail if the file is empty so this provides some
        * valid but empty zstd data
        */
-      logFile.write_all(&EMPTY_ZSTD).trace(Error::RunFsFail)?;
+      logFile.write_all(&EMPTY_ZSTD).into_trace(Error::RunFsFail)?;
 
       if (self.log.set(Logger::new(logFile)).is_err())
       {
-        return Err(ErrorTrace::new(Error::Unknown, &format!("Failed to set logger for {}", self.name)))
+        return Err(Error::Unknown.trace(&format!("Failed to set logger for {}",
+                                          self.name)))
       }
     }
 
-    let (reader, writer) = pipe().trace(Error::Unknown)?;
+    let (reader, writer) = pipe().into_trace(Error::Unknown)?;
     /*
      * Based on the service's pattern we either spawn it in the background
      * and watch it or run it in foreground and wait for it to finish
      */
     match (self.pattern)
     {
-      Pattern::Standard =>
+      Standard | Forking =>
       {
         // Spawn the process in the background asynchronous to the program
         let process = Command::new(&self.exec[0]).args(args)
-                        .stdout(writer.try_clone().trace(Error::Unknown)?).stderr(writer).spawn()
-                        .context_trace(&self.name, Error::ServiceUp)?;
+                        .stdout(writer.try_clone().into_trace(Error::Unknown)?)
+                        .stderr(writer)
+                        .spawn()
+                        .into_trace(Error::ServiceUp).context(&self.name)?;
 
         // Where our pid info is stored
         let mut pidFile = File::create_new(path!("/run/kickit/service", &self.name, "pid"))
-                                  .trace(Error::RunFsFail)?;
+                                  .into_trace(Error::RunFsFail)?;
 
         // Write the PID in text
-        pidFile.write_all(process.id().to_string().as_bytes()).trace(Error::RunFsFail)?;
+        pidFile.write_all(process.id().to_string().as_bytes()).into_trace(Error::RunFsFail)?;
         // Transfer the process to our service
         self.process = Some(process);
 
@@ -223,18 +230,18 @@ impl Service
           self.log("Started service", true)?;
         }
       },
-      Pattern::RunOnce =>
+      RunOnce =>
       {
         // Start the service's process & wait for it to finish
         let process = Command::new(&self.exec[0]).args(args).stderr(Stdio::piped()).output()
-                        .context_trace(&self.name, Error::ServiceUp)?;
+                        .into_trace(Error::ServiceUp).context(&self.name)?;
 
         let stderr = BufReader::new(Cursor::new(process.stderr));
 
         for maybeLine in (stderr.split(b'\n'))
         {
-          let line = maybeLine.context_trace(format!("Invalid input for {}", self.name), Error::Format)?;
-          let stringLine = String::from_utf8(line).context_trace(&self.name, Error::Format)?;
+          let line = maybeLine.into_trace(Error::Format).context(format!("Invalid input for {}", self.name))?;
+          let stringLine = String::from_utf8(line).into_trace(Error::Format).context(&self.name)?;
 
           self.log(&stringLine, false)?;
         }
@@ -245,15 +252,15 @@ impl Service
           self.log("Service has finished", true)?;
         }
         else {
-          return Err(ErrorTrace::new(Error::ServiceUp, &self.name))
+          return Err(Error::ServiceUp.trace(&self.name))
         }
 
-        File::create_new(FindPath::path(self, Path::Exited)?).trace(Error::RunFsFail)?;
+        File::create_new(FindPath::path(self, Path::Exited)?).into_trace(Error::RunFsFail)?;
 
         if let Some(log) = self.log.get_mut()
         {
           // Make logfile read-only as the process has finished
-          log.file.set_permissions(Permissions::from_mode(0o400)).trace(Error::RunFsFail)?;
+          log.file.set_permissions(Permissions::from_mode(0o400)).into_trace(Error::RunFsFail)?;
         }
         // done!!!!!!!!!!!!!!!!!!!!!!!!!
       }
@@ -279,15 +286,12 @@ impl Service
   {
     use crate::init::{init_console::status, service::Pattern::RunOnce};
 
-    affirm!(self.state == Up,
-      ErrorTrace::with_context(Error::ServiceDown, &self.name, "Already down"));
-
-    affirm!(self.pattern != RunOnce,
-      ErrorTrace::with_context(Error::ServiceDown, &self.name, "Has a RunOnce pattern"));
+    affirm!(self.state == Up, Error::ServiceDown.trace("Already down").context(&self.name));
+    affirm!(self.pattern != RunOnce, Error::ServiceDown.trace("Invalid pattern").context(&self.name));
 
     status!("Killing service: {}", &self.name);
     // Kill the process's main process & by extension all its subprocesses
-    self.process.as_mut().unwrap().kill().context_trace(&self.name, Error::ServiceDown)?;
+    self.process.as_mut().unwrap().kill().into_trace(Error::ServiceDown).context(&self.name)?;
 
     self.log(&format!("Fossilised service: {}", self.name), true)?;
     // Process was successfully killed
@@ -326,7 +330,7 @@ impl Service
         let mut log = String::new();
 
         let mut logReader = logger.reader
-                              .as_ref().ok_or(ErrorTrace::new(Error::Unknown, "Log reader missing!"))?;
+                              .as_ref().ok_or(Error::Unknown.trace("Log reader missing!"))?;
 
         /*
          * Read stderr and take one byte; if this fails then we know there
@@ -344,7 +348,7 @@ impl Service
           for maybeByte in (BufReader::new(logReader).bytes())
           {
             // Panic if byte is Err (should never be)
-            let byte = maybeByte.context_trace(&self.name, Error::ServiceLog)?;
+            let byte = maybeByte.into_trace(Error::ServiceLog).context(&self.name)?;
 
             // This is our EOF- we know to stop reading bytes here
             if (byte == b'\n')
@@ -399,7 +403,7 @@ impl Service
       return Ok(())
     }
 
-    let log = self.log.get_mut().ok_or(ErrorTrace::new(Error::Unknown, "Log uninitialised!"))?;
+    let log = self.log.get_mut().ok_or(Error::Unknown.trace("Log uninitialised!"))?;
 
     /*
      * We cannot have more than 1 line of content, this function is designed
@@ -413,17 +417,17 @@ impl Service
      * Because this function will be called multiple times, changing the seek
      * on the log file, we do this to ensure we are reading from the beginning
      */
-    log.file.rewind().trace(Error::Unknown)?;
+    log.file.rewind().into_trace(Error::Unknown)?;
 
     // This is the zstd decoder which wraps over the file & implements Read
-    let mut decoder = StreamingDecoder::new(&log.file).trace(Error::Unknown)?;
+    let mut decoder = StreamingDecoder::new(&log.file).into_trace(Error::Unknown)?;
     let mut contents = Vec::new();
     // Read the decompressed log contents
-    decoder.read_to_end(&mut contents).trace(Error::AccessLog)?;
+    decoder.read_to_end(&mut contents).into_trace(Error::AccessLog)?;
 
     // This is to timestamp the log at the time it was received
     let timeNow = SystemTime::now().duration_since(UNIX_EPOCH)
-                                    .trace(Error::Unknown)?
+                                    .into_trace(Error::Unknown)?
                                     .as_millis()
                                     .to_string();
 
@@ -459,7 +463,7 @@ impl Service
      * Reading from the logfile changes the cursor position so we set it back to
      * the beginning to overwrite the file instead of appending it
      */
-    log.file.rewind().trace(Error::Unknown)?;
+    log.file.rewind().into_trace(Error::Unknown)?;
     // Overwrite log file with new contents
     compress(Cursor::new(contents), &mut log.file, CompressionLevel::Fastest);
     log.line += 1;
@@ -481,21 +485,7 @@ impl Service
     // Try to stop it or return error if that fails
     self.down()?;
 
-    /*
-     * If the service has shout set to true, then there is no point in providing
-     * the service's log as a trace since it has already been reported
-     */
-    let error = if (self.shout)
-    {
-      ErrorTrace::with_context(Error::ServiceNotRunning, &self.name, "")
-    }
-    /* else if let Some(log) = &self.log.last
-    {
-      ErrorTrace::with_context(Error::ServiceNotRunning, &self.name, log)
-    } */
-    else {
-      ErrorTrace::new(Error::ServiceNotRunning, &self.name)
-    };
+    let error = Error::ServiceNotRunning.trace("Service died!").context(&self.name);
 
     if (self.optional)
     {
@@ -517,10 +507,9 @@ impl Service
   {
     use crate::init::service::Pattern::RunOnce;
 
-    affirm!(self.state == Up, ErrorTrace::new(Error::ServiceAccess, "Down"));
+    affirm!(self.state == Up, Error::ServiceAccess.trace("Down"));
 
-    affirm!(self.pattern != RunOnce, ErrorTrace::new(Error::ServiceAccess,
-                                    "Cannot get PID: Service has an incompatible pattern"));
+    affirm!(self.pattern != RunOnce, Error::ServiceAccess.trace("Cannot get PID: Service has an incompatible pattern"));
 
     match (&self.process)
     {

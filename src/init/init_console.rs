@@ -91,16 +91,20 @@ pub trait ErrorResult<OkType, ErrType> where ErrType: Display
     * Convert an error to a trace without context
     *
     * # Errors
-    * - Data type contains an error (e.g. Result is not Ok(x) variant)
-   **/
-  fn trace(self, errorKind: Error) -> Result<OkType>;
+    * - Data type contains an error (e.g. Result is Err(..))
+    */
+  fn into_trace(self, errorKind: Error) -> Result<OkType>;
+}
+
+pub trait ExtendWithContext<OkType>
+{
   /**
-    * Same but with context
+    * Add context to an existing trace error
     *
     * # Errors
-    * - Data type contains an error (e.g. Result is not Ok(x) variant)
-   **/
-  fn context_trace(self, context: impl Display, errorKind: Error) -> Result<OkType>;
+    * - Result is of error variant
+    */
+  fn context(self, context: impl Display) -> Result<OkType>;
 }
 
 // A traceless, unknown error is the default
@@ -108,7 +112,7 @@ impl Default for ErrorTrace
 {
   fn default() -> Self
   {
-    ErrorTrace::new(Error::default(), "")
+    Error::default().trace("")
   }
 }
 
@@ -188,7 +192,7 @@ impl From<Error> for ErrorTrace
 {
   fn from(kind: Error) -> Self
   {
-    Self::new(kind, "")
+    kind.trace("")
   }
 }
 
@@ -206,51 +210,53 @@ impl Error
 
     process::exit(1);
   }
+
+  pub fn trace(self, t: &(impl Display + ?Sized)) -> ErrorTrace
+  {
+    ErrorTrace { kind: self, context: None, trace: t.to_string() }
+  }
 }
 
 impl ErrorTrace
 {
-  pub fn new(k: Error, t: &(impl Display + ?Sized)) -> Self
+  pub fn context(self, context: &(impl Display + ?Sized)) -> Self
   {
-    Self { kind: k, context: None, trace: t.to_string() }
+    Self { kind: self.kind, context: Some(context.to_string()), trace: self.trace }
   }
+}
 
-  pub fn with_context(k: Error, c: &(impl Display + ?Sized), t: &(impl Display + ?Sized))
-    -> Self
+impl<T> ExtendWithContext<T> for Result<T>
+{
+  fn context(self, context: impl Display) -> Result<T>
   {
-    Self { kind: k, context: Some(c.to_string()), trace: t.to_string() }
+    match (self)
+    {
+      Ok(ok) => Ok(ok),
+      Err(error) => Err(
+      {
+        ErrorTrace {
+          kind: error.kind,
+          context: Some(context.to_string()),
+          trace: error.trace
+        }
+      })
+    }
   }
 }
 
 impl<OkType, ErrType: Display> ErrorResult<OkType, ErrType> for StdResult<OkType, ErrType>
 {
-  fn trace(self, errorKind: Error) -> Result<OkType>
+  fn into_trace(self, errorKind: Error) -> Result<OkType>
   {
-    self.map_err(|e| ErrorTrace::new(errorKind, &e))
-  }
-
-  fn context_trace(self, c: impl Display, k: Error) -> Result<OkType>
-  {
-    self.map_err(|e| ErrorTrace::with_context(k, &c, &e))
+    self.map_err(|e| errorKind.trace(&e))
   }
 }
 
 impl<ErrType: Display> ErrorResult<(), ErrType> for Option<ErrType>
 {
-  fn trace(self, k: Error) -> Result<()>
+  fn into_trace(self, k: Error) -> Result<()>
   {
-    if let Some(e) = self.map(|why| ErrorTrace::new(k, &why))
-    {
-      Err(e)
-    }
-    else {
-      Ok(())
-    }
-  }
-
-  fn context_trace(self, c: impl Display, k: Error) -> Result<()>
-  {
-    if let Some(e) = self.map(|why| ErrorTrace::with_context(k, &c, &why))
+    if let Some(e) = self.map(|why| k.trace(&why))
     {
       Err(e)
     }
@@ -262,25 +268,17 @@ impl<ErrType: Display> ErrorResult<(), ErrType> for Option<ErrType>
 
 impl ErrorResult<(), String> for String
 {
-  fn trace(self, k: Error) -> Result<()>
+  fn into_trace(self, k: Error) -> Result<()>
   {
-    Err(ErrorTrace::new(k, &self))
-  }
-  fn context_trace(self, c: impl Display, k: Error) -> Result<()>
-  {
-    Err(ErrorTrace::with_context(k, &c, &self))
+    Err(k.trace(&self))
   }
 }
 
 impl ErrorResult<(), std::io::Error> for io::Error
 {
-  fn trace(self, k: Error) -> Result<()>
+  fn into_trace(self, k: Error) -> Result<()>
   {
-    Err(ErrorTrace::new(k, &self))
-  }
-  fn context_trace(self, c: impl Display, k: Error) -> Result<()>
-  {
-    Err(ErrorTrace::with_context(k, &c, &self))
+    Err(k.trace(&self))
   }
 }
 

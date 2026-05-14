@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use tokio::net::UnixStream;
-use crate::init::init_console::{ErrorTrace, Error, ErrorResult};
+use crate::init::init_console::{Error, ExtendWithContext, ErrorResult, Result};
 
 #[macro_export]
 macro_rules! socket_struct
@@ -71,7 +71,7 @@ pub trait Socket
  */
 pub trait Open: Socket + Sync + 'static
 {
-  fn open_sock(&'static self) -> impl Future<Output = Result<(), ErrorTrace>> + Send
+  fn open_sock(&'static self) -> impl Future<Output = Result<()>> + Send
   {
     async move
     {
@@ -90,17 +90,17 @@ pub trait Open: Socket + Sync + 'static
         }
       });
 
-      let sock = UnixSocket::new_stream().trace(Error::Socket)?;
+      let sock = UnixSocket::new_stream().into_trace(Error::Socket)?;
       // Bind (start) our socket here
-      sock.bind(&path).context_trace(path.display(), Error::RunFsFail)?;
+      sock.bind(&path).into_trace(Error::RunFsFail).context(path.display())?;
 
       /*
        * thanks <https://users.rust-lang.org/t/how-to-manage-permissions-of-a-unixlistener/31039/8>
        * for having an answer for this it really hurt my head
        */
-      set_permissions(&path, permissions).context_trace(path.display(), Error::RunFsFail)?;
+      set_permissions(&path, permissions).into_trace(Error::RunFsFail).context(path.display())?;
 
-      let listener = sock.listen(1).trace(Error::Socket)?;
+      let listener = sock.listen(1).into_trace(Error::Socket)?;
 
       while let Ok((stream, _)) = listener.accept().await
       {

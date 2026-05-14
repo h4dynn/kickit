@@ -151,7 +151,7 @@ pub fn mount(from: Option<&str>, to: &str, fsType: Option<&str>, flags: Flags, o
     }
   };
 
-  nix::mount::mount(from, to, fsType, flags.into(), nixOpts).trace(Error::SysFsMount)?;
+  nix::mount::mount(from, to, fsType, flags.into(), nixOpts).into_trace(Error::SysFsMount)?;
 
   Ok(())
 }
@@ -165,7 +165,7 @@ pub fn unmount(dest: &str) -> Result<(), crate::init::init_console::ErrorTrace>
 {
   use crate::init::init_console::{Error, ErrorResult};
 
-  nix::mount::umount(dest).trace(Error::SysFsUnmount)?;
+  nix::mount::umount(dest).into_trace(Error::SysFsUnmount)?;
   Ok(())
 }
 
@@ -182,7 +182,7 @@ pub fn mounted<P: AsRef<std::path::Path> + std::fmt::Display>(mountpoint: P)
   use crate::init::init_console::{Error, ErrorResult};
 
   // Cycle through potential matches from /proc/mounts
-  for candMount in (fs::read_to_string("/proc/mounts").trace(Error::FileNotFound)?.split('\n'))
+  for candMount in (fs::read_to_string("/proc/mounts").into_trace(Error::FileNotFound)?.split('\n'))
   {
     if (candMount.split(' ').nth(1) == Some(&mountpoint.to_string()))
     {

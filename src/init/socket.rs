@@ -15,7 +15,7 @@ macro_rules! fail
   ($stream: expr, $byte: tt) =>
   {
     // Write our "error byte" to signal to peer an error has occurred
-    $stream.try_write(&[$byte]).trace(Error::Socket).or_warn();
+    $stream.try_write(&[$byte]).into_trace(Error::Socket).or_warn();
     // Exit our function- do nothing more here
     return
   };
@@ -94,7 +94,7 @@ impl Socket for Core
       // Send an error for unknown bytes
       _ => { fail!(stream, 0x0f); }
     }
-      .trace(Error::Socket).or_warn();
+      .into_trace(Error::Socket).or_warn();
   }
 }
 
@@ -123,7 +123,7 @@ impl Socket for Log
     else {
       stream.try_write(&[0x0f])
     }
-      .trace(Error::Socket).or_warn();
+      .into_trace(Error::Socket).or_warn();
   }
 }
 
@@ -145,8 +145,8 @@ impl Socket for Power
 
     match (input[0])
     {
-      Self::SHUTDOWN => reboot(RebootMode::RB_POWER_OFF).trace(Error::Unknown).or_warn(),
-      Self::REBOOT => reboot(RebootMode::RB_AUTOBOOT).trace(Error::Unknown).or_warn(),
+      Self::SHUTDOWN => reboot(RebootMode::RB_POWER_OFF).into_trace(Error::Unknown).or_warn(),
+      Self::REBOOT => reboot(RebootMode::RB_AUTOBOOT).into_trace(Error::Unknown).or_warn(),
       // Write error byte to socket- unexpected input
       _ => { fail!(stream, 0x0f); }
     }

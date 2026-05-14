@@ -12,7 +12,7 @@ pub mod target;
 pub mod socket;
 
 use std::sync::OnceLock;
-use self::init_console::{Error, ErrorTrace, Result};
+use self::init_console::{Error, Result, ExtendWithContext};
 
 // Once the target is sourced its configuration will be stored here
 pub static TARGET: OnceLock<self::target::Target> = OnceLock::new();
@@ -48,7 +48,7 @@ pub fn cmdlineParam(param: &str) -> Result<Option<String>>
 
   // Read the cmdline from procfs
   let cmdline = fs::read_to_string(PathBuf::from("/proc/cmdline"))
-                    .context_trace("/proc/cmdline", Error::FileNotFound)?;
+                    .into_trace(Error::FileNotFound).context("/proc/cmdline")?;
 
   // Split the cmdline's parameters by spaces
   for rawCmdlineParam in (cmdline.split(' '))
@@ -73,5 +73,5 @@ pub fn cmdlineParam(param: &str) -> Result<Option<String>>
   }
 
   // Command-line parameter was not found at all
-  Err(ErrorTrace::with_context(Error::Cmdline, param, ""))
+  Err(Error::Cmdline.trace(param))
 }
