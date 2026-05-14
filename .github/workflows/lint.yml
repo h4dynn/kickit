@@ -29,8 +29,4 @@ jobs:
 
       - name: Run shellcheck
         run: |
-          for sh in ./scripts/*.sh
-          do {
-            shellcheck "${sh}"
-          }
-          done
+          find -type f -name '*.sh' -exec shellcheck '{}' \;
