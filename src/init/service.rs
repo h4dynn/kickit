@@ -21,8 +21,7 @@ pub struct Service
   exec: Vec<String>,
 
   // Automatically set options by service manager
-  //state: State,
-  up: bool,
+  state: State,
   process: Option<Child>,
   log: OnceLock<Logger>
 }
@@ -36,6 +35,15 @@ pub struct Logger
   file: fs::File,
   reader: Option<std::io::PipeReader>
 }
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+pub enum State
+{
+  Up,
+  #[default]
+  Down
+}
+use State::{Up, Down};
 
 /*
  * Standard -> Service runs in background (on another thread), monitored by kickit,
@@ -129,7 +137,7 @@ impl Service
     Ok(Self
     {
       name: name.into(), description, optional, shout,
-      pattern, logger, exec: config.exec, up: false,
+      pattern, logger, exec: config.exec, state: Down,
       process: None, log: OnceLock::new()
     })
   }
@@ -149,7 +157,8 @@ impl Service
     const EMPTY_ZSTD: [u8; 13] = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01,
                                   0x00, 0x00, 0x99, 0xe9, 0xd8, 0x51];
 
-    affirm!(!self.up, ErrorTrace::with_context(Error::ServiceUp, &self.name, "already up"));
+    affirm!(self.state == Down,
+              ErrorTrace::with_context(Error::ServiceUp, &self.name, "already up"));
 
     // Our arguments for the executable
     let args =
@@ -251,7 +260,7 @@ impl Service
     }
 
     // yippie!
-    self.up = true;
+    self.state = Up;
 
     Ok(())
   }
@@ -270,7 +279,7 @@ impl Service
   {
     use crate::init::{init_console::status, service::Pattern::RunOnce};
 
-    affirm!(self.up,
+    affirm!(self.state == Up,
       ErrorTrace::with_context(Error::ServiceDown, &self.name, "Already down"));
 
     affirm!(self.pattern != RunOnce,
@@ -282,7 +291,7 @@ impl Service
 
     self.log(&format!("Fossilised service: {}", self.name), true)?;
     // Process was successfully killed
-    self.up = false;
+    self.state = Down;
 
     Ok(())
   }
@@ -508,7 +517,7 @@ impl Service
   {
     use crate::init::service::Pattern::RunOnce;
 
-    affirm!(self.up, ErrorTrace::new(Error::ServiceAccess, "Down"));
+    affirm!(self.state == Up, ErrorTrace::new(Error::ServiceAccess, "Down"));
 
     affirm!(self.pattern != RunOnce, ErrorTrace::new(Error::ServiceAccess,
                                     "Cannot get PID: Service has an incompatible pattern"));
