@@ -5,8 +5,8 @@
 > [!WARNING]
 > `kickit` is a work-in-progress. Many features are unimplemented or unstable.[^1]
 
-![Lint](https://github.com/h4dynn/kickit/actions/workflows/clippy.yml/badge.svg)
-![Nightly Lint](https://github.com/h4dynn/kickit/actions/workflows/clippy-nightly.yml/badge.svg)
+![Lint](https://github.com/h4dynn/kickit/actions/workflows/lint.yml/badge.svg)
+![Nightly Lint](https://github.com/h4dynn/kickit/actions/workflows/nightly-lint.yml/badge.svg)
 
 # Design
 
