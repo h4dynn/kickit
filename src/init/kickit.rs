@@ -13,15 +13,15 @@ use kickit::{
 
 trait StartService
 {
-  fn start(self) -> Result<()>;
+  fn start(self) -> Result<Option<task::JoinHandle<()>>>;
 }
 
 impl StartService for Service
 {
   #[inline]
-  fn start(mut self) -> Result<()>
+  fn start(mut self) -> Result<Option<task::JoinHandle<()>>>
   {
-    use kickit::{init::service::Pattern::Standard, state};
+    use kickit::{init::service::Pattern::{Standard, Forking, RunOnce}, state};
 
     status!("Starting service: {}", self.name);
 
@@ -42,14 +42,13 @@ impl StartService for Service
         return Err(trace)
       }
     }
-    // Watch the service to update logs & make sure it isn't killed
-    else if (self.pattern == Standard)
-    {
-      // Spawn the service watcher on another thread
-      task::spawn(async move { self.watch().handle() });
-    }
 
-    Ok(())
+    Ok(match (self.pattern)
+    {
+      // Watch the service to update logs & make sure it isn't killed
+      Standard | Forking => Some(task::spawn(async move { self.watch().handle() })),
+      RunOnce => None
+    })
   }
 }
 
@@ -88,14 +87,17 @@ fn sanity(sideInit: bool) -> StdResult<(), Error>
 /*
  * /run/kickit
  * |
- * ├── target.toml -> A symlink to the actual target (usually stored in /usr/lib/kickit/target/)
- * |
  * ├── service     -> All services which have been initialised by kickit
  * |   |
  * |   └── [NAME]
  * |       ├── pid    -> The service's process ID (Standard services only)
  * |       ├── exited -> The service's exit code (RunOnce services only)
  * |       └── log    -> The service's log (only accessible to root)
+ * |
+ * ├── private     -> Sockets accessible to root user only
+ * |   |
+ * |   ├── io.Power   -> Socket that handles poweroff/reboot requests
+ * |   └── io.Log     -> Socket that provides the init's master log
  * |
  * └── io.Core     -> The socket that ktctl uses to gather info like state, version & target
  */
@@ -126,7 +128,6 @@ fn setupRunFs(services: &Vec<String>, debugDump: bool) -> Result<()>
     fs::create_dir_all(&dumpDir).into_trace(Error::RunFsFail)?;
 
     // Create a symlink so it acts as if it is a directory
-    //symlink(dumpDir, PathBuf::from("/run/kickit")).into_trace(Error::RunFsFail)?;
     symlink(dumpDir, PathBuf::from("/run/kickit")).into_trace(Error::RunFsFail)?;
   }
 
@@ -210,9 +211,9 @@ macro_rules! socks
 #[tokio::main]
 async fn main()
 {
-  use std::{thread, time::Duration, env};
+  use std::{thread::park, env};
   use tokio::runtime::Runtime as AsyncRuntime;
-  use kickit::{init::{target, cmdlineParam}, socket, socket::Open};
+  use kickit::{init::{target, cmdlineParam, SERVICE_WATCHERS}, socket, socket::Open};
 
   let rt: AsyncRuntime = AsyncRuntime::new().into_trace(Error::Unknown).handle();
 
@@ -274,6 +275,7 @@ async fn main()
   // Open our sockets
   socks!(rt, socket::Core, socket::Log, socket::Power);
 
+  let mut watchers = Vec::<task::JoinHandle<()>>::new();
   // Startup our services & wait for it to finish
   for service in (services)
   {
@@ -282,8 +284,14 @@ async fn main()
      * We also can't implement Clone because `Child` doesn't implement it.
      * This is gonna make killing a service really difficult
      */
-    service.start().handle();
+    if let Some(watcher) = service.start().handle()
+    {
+      watchers.push(watcher);
+    }
   }
 
-  thread::sleep(Duration::new(u64::MAX, 0));
+  oncelock! { let SERVICE_WATCHERS = watchers }.handle();
+
+  // Block indefinitely
+  park();
 }

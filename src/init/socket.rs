@@ -133,7 +133,7 @@ impl Socket for Power
 
   async fn handler(&self, stream: UnixStream)
   {
-    use nix::sys::reboot::{reboot, RebootMode};
+    use crate::init::power::{poweroff, Mode};
 
     stream_sanity!(stream => Readable + Writable);
     let mut input = [0u8];
@@ -145,8 +145,8 @@ impl Socket for Power
 
     match (input[0])
     {
-      Self::SHUTDOWN => reboot(RebootMode::RB_POWER_OFF).into_trace(Error::Unknown).or_warn(),
-      Self::REBOOT => reboot(RebootMode::RB_AUTOBOOT).into_trace(Error::Unknown).or_warn(),
+      Self::SHUTDOWN => poweroff(Mode::Shutdown).or_warn(),
+      Self::REBOOT => poweroff(Mode::Reboot).or_warn(),
       // Write error byte to socket- unexpected input
       _ => { fail!(stream, 0x0f); }
     }

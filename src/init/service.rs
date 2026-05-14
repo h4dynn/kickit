@@ -497,6 +497,27 @@ impl Service
 
   /**
     * # Errors
+    * * Service isn't running
+    * * Service has a `RunOnce` pattern
+    * * Service's process couldn't be found
+    */
+  pub fn pid(&self) -> Result<u32>
+  {
+    use crate::init::service::Pattern::RunOnce;
+
+    affirm!(self.state == Up, Error::ServiceAccess.trace("Down"));
+    // These aren't saved because they'll be dead
+    affirm!(self.pattern != RunOnce, Error::ServiceAccess.trace("Cannot get PID for RunOnce service"));
+
+    match (&self.process)
+    {
+      Some(i) => Ok(i.id()),
+      None => Err(Error::ServiceAccess.into())
+    }
+  }
+
+  /**
+    * # Errors
     * * Service was killed/zombified and isn't optional
     * * Service couldn't be killed gracefully (`.down()` method)
     */
@@ -518,27 +539,6 @@ impl Service
     }
     else {
       Err(error)
-    }
-  }
-
-  /**
-    * # Errors
-    * * Service isn't running
-    * * Service has a `RunOnce` pattern
-    * * Service's process couldn't be found
-    */
-  fn pid(&self) -> Result<u32>
-  {
-    use crate::init::service::Pattern::RunOnce;
-
-    affirm!(self.state == Up, Error::ServiceAccess.trace("Down"));
-
-    affirm!(self.pattern != RunOnce, Error::ServiceAccess.trace("Cannot get PID: Service has an incompatible pattern"));
-
-    match (&self.process)
-    {
-      Some(i) => Ok(i.id()),
-      None => Err(Error::ServiceAccess.into())
     }
   }
 }

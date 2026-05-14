@@ -10,6 +10,7 @@ pub mod mount;
 pub mod service;
 pub mod target;
 pub mod socket;
+pub mod power;
 
 use std::sync::OnceLock;
 use self::init_console::{Error, Result, ExtendWithContext};
@@ -19,6 +20,8 @@ pub static TARGET: OnceLock<self::target::Target> = OnceLock::new();
 pub static TARGET_NAME: OnceLock<String> = OnceLock::new();
 // If set to true, master log entries won't be shown on console
 pub static QUIET: OnceLock<bool> = OnceLock::new();
+
+pub static SERVICE_WATCHERS: OnceLock<Vec<tokio::task::JoinHandle<()>>> = OnceLock::new();
 
 // The default shell will be bash unless the "posix_sh" feature is set
 pub(crate) const SHELL: &str =
