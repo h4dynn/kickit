@@ -320,8 +320,6 @@ macro_rules! log
       // Get the oncelock or fallback to false if not already set
       let quiet = QUIET.get().unwrap_or(&false);
 
-      dbg!(quiet);
-
       // Don't print to console if quiet mode is enabled
       if (!quiet)
       {

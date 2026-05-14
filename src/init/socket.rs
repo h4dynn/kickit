@@ -88,7 +88,7 @@ impl Socket for Core
           fail!(stream, 0x0f);
         }
       },
-      Self::PID => stream.try_write(&process::id().to_ne_bytes()),
+      Self::PID => stream.try_write(&process::id().to_le_bytes()),
       // Safely ignore newlines
       b'\n' => Ok(0),
       // Send an error for unknown bytes

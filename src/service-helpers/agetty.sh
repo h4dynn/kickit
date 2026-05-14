@@ -3,7 +3,6 @@
 # ############################################### #
 # This script was adapted from Void Linux's runit #
 # agetty-ttyX script                              #
-# ############################################### #
 # Check out the repository here:                  #
 # <https://github.com/void-linux/void-runit>      #
 # ############################################### #
@@ -31,13 +30,14 @@ then {
 }
 else {
   # The default configuration options
-  readonly TTYS=7
+  readonly TTYS=6
   readonly BAUD_RATE=38400
   readonly TERM_NAME=linux
 }
 fi
 
 tty=0
+# C-style for loops are not supported in POSIX shell
 while [ $tty -le "$TTYS" ]
 do {
   tty=$((tty+1))
@@ -48,8 +48,9 @@ do {
 done
 
 # Loop forever
-while sleep 100000
+while :
 do {
-  :
+  # The max cap for the sleep binary
+  sleep 2073600
 }
 done

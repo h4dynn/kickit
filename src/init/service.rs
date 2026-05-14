@@ -1,6 +1,6 @@
 //! Service implementation
 
-use std::{fs, process::{Command, Stdio, Child}, sync::OnceLock, path::PathBuf};
+use std::{fs, io, process::{Command, Stdio, Child}, sync::OnceLock, path::PathBuf};
 use serde::Deserialize;
 use crate::{init::init_console::{Error, ExtendWithContext, ErrorResult, Result},
       console::affirm, file_path, path};
@@ -18,6 +18,7 @@ pub struct Service
   pub pattern: Pattern,
   pub logger: bool,
   shout: bool,
+  runFolder: Option<RunDirectory>,
   exec: Vec<String>,
 
   // Automatically set options by service manager
@@ -33,7 +34,7 @@ pub struct Logger
   line: usize,
   // Matching log file
   file: fs::File,
-  reader: Option<std::io::PipeReader>
+  reader: Option<io::PipeReader>
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
@@ -62,6 +63,15 @@ pub enum Pattern
 }
 use Pattern::{Standard, Forking, RunOnce};
 
+#[derive(Deserialize, PartialEq, Eq, Clone, Debug)]
+struct RunDirectory
+{
+  name: String,
+  group: u32,
+  owner: u32,
+  mode: u32
+}
+
 // This is used when toml::from_str() sources the service's configuration
 #[derive(Deserialize, PartialEq, Eq, Clone, Debug)]
 struct Config
@@ -71,6 +81,7 @@ struct Config
   shout: Option<bool>,
   pattern: Option<Pattern>,
   logger: Option<bool>,
+  run_folder: Option<RunDirectory>,
   exec: Vec<String>
 }
 
@@ -142,8 +153,9 @@ impl Service
     Ok(Self
     {
       name: name.into(), description, optional, shout,
-      pattern, logger, exec: config.exec, state: Down,
-      process: None, log: OnceLock::new()
+      runFolder: config.run_folder, pattern, logger,
+      exec: config.exec, state: Down, process: None,
+      log: OnceLock::new()
     })
   }
 
@@ -155,6 +167,7 @@ impl Service
   #[inline]
   pub fn up(&mut self) -> Result<()>
   {
+    use nix::unistd::{chown, Uid, Gid};
     use std::{fs::{File, Permissions}, os::unix::fs::PermissionsExt,
               io::{Write, BufRead, Cursor, BufReader, pipe}};
 
@@ -194,9 +207,20 @@ impl Service
 
       if (self.log.set(Logger::new(logFile)).is_err())
       {
-        return Err(Error::Unknown.trace(&format!("Failed to set logger for {}",
-                                          self.name)))
+        return Err(Error::Unknown.trace(&format!("Failed to set logger for {}", self.name)))
       }
+    }
+
+    // Create the run folder, if one is given
+    if let Some(run) = &self.runFolder
+    {
+      let path = path!("/run", &run.name);
+      fs::create_dir(&path).into_trace(Error::RunFsFail).context(&run.name)?;
+
+      // Change the owner (UID) & group (GID)
+      chown(&path, Some(Uid::from_raw(run.owner)), Some(Gid::from_raw(run.group))).into_trace(Error::RunFsFail)?;
+      // Set the permissions mode
+      fs::set_permissions(path, Permissions::from_mode(run.mode)).into_trace(Error::RunFsFail)?;
     }
 
     let (reader, writer) = pipe().into_trace(Error::Unknown)?;

@@ -248,13 +248,14 @@ async fn main()
    * By having our target in a OnceLock we ensure that others parts of the init
    * can access it hassle-free for e.g. logging or services
    */
-  oncelock! { let TARGET = target::source(String::from(targetName)).handle() }.handle();
+  oncelock! { let TARGET = target::source(targetName.to_owned()).handle() }.handle();
   oncelock! { let TARGET_NAME = targetName.to_owned() }.handle();
 
+  // We've just set it so this shouldn't fail
   let target = TARGET.get().ok_or(Error::Unknown.trace("target is inaccessible")).handle();
 
   status!("Initialising services");
-  let ktServices = initServices(&target.services).handle();
+  let services = initServices(&target.services).handle();
 
   // If we are running alongside another init these things should've already been done
   if (!noInit)
@@ -274,9 +275,14 @@ async fn main()
   socks!(rt, socket::Core, socket::Log, socket::Power);
 
   // Startup our services & wait for it to finish
-  for service in (ktServices)
+  for service in (services)
   {
-    StartService::start(service).handle();
+    /*
+     * TO-DO: Cannot use service after this because it gets moved.
+     * We also can't implement Clone because `Child` doesn't implement it.
+     * This is gonna make killing a service really difficult
+     */
+    service.start().handle();
   }
 
   thread::sleep(Duration::new(u64::MAX, 0));

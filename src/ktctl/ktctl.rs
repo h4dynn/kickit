@@ -348,7 +348,7 @@ impl Init
       Emergency | Down => Colour::RED, Stalled => Colour::ORANGE, Ok => Colour::GREEN
     };
 
-    let initPid = u32::from_be_bytes(Pid.request().await?
+    let initPid = u32::from_le_bytes(Pid.request().await?
                                       .try_into()
                                       .map_err(|_| KTCtlErrorTrace::new(KTCtlError::Format, "Invalid init pid!"))?);
 

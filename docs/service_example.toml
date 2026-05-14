@@ -24,5 +24,11 @@ pattern = "RunOnce"
 #
 logger = true
 
+#
+# If the service you're using needs a run directory to be created
+# (like dbus does), you can specify the settings for one here
+#
+run_folder = { name = "hello", owner = 0, group = 0, mode = 0o755 }
+
 # The path of the executable followed by the argument(s)
 exec = ["/bin/bash", "-c", "echo 'Hello world' >&2"]
