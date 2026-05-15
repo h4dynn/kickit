@@ -36,15 +36,14 @@ impl Into<RebootMode> for Mode
   */
 pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
 {
-  use crate::{path, console::ReturnError};
-  use super::{SERVICE_WATCHERS, init_console::status};
+  use crate::{path, console::{ReturnError, HandleError}, oncelock};
+  use super::{POWER_OFF, mount::unmount, init_console::status};
   use nix::{unistd::Pid, sys::{reboot::reboot, signal::{kill, Signal}}};
   use std::{fs, path::PathBuf};
 
-  let watchers = SERVICE_WATCHERS.get().ok_or(Error::Unknown.trace("Failed to get service watchers!"))?;
-  let pidsAndNames =
+  let pidsAndNames: Vec<(u32, OsString)> =
   {
-    let mut inner = Vec::<(u32, OsString)>::new();
+    let mut inner = Vec::new();
 
     // List all the services in the runfs directory
     for maybeService in (fs::read_dir(PathBuf::from("/run/kickit/service")).into_trace(Error::RunFsFail)?)
@@ -67,13 +66,10 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
 
     inner
   };
+  let mounts = fs::read_to_string("/proc/mounts").into_trace(Error::Unknown)?;
 
-  status!("Killing service watchers");
-  for watcher in (watchers)
-  {
-    // Kill the watcher
-    watcher.abort();
-  }
+  // This makes sure that when we kill the services, the service manager doesn't throw an error
+  oncelock! { let POWER_OFF = true }?;
 
   for (pid, name) in (pidsAndNames)
   {
@@ -85,6 +81,25 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
       err.warn();
       // If that doesn't work we use SIGKILL
       kill(Pid::from_raw(pid.cast_signed()), Some(Signal::SIGKILL)).into_trace(Error::Unknown)?;
+    }
+  }
+
+  for mountInfoString in (mounts.lines())
+  {
+    // Split for each space found
+    let info: Vec<&str> = mountInfoString.split_ascii_whitespace().collect();
+    let mountpoint = info[1];
+
+    match (mountpoint)
+    {
+      // These are special system filesystems, unmounting them would be bad
+      "/dev" | "/dev/pts" | "/proc" | "/sys" | "/sys/fs/cgroup" => (),
+      // Hopefully safe to unmount
+      _ =>
+      {
+        status!("Unmounting filesystem: {mountpoint}");
+        unmount(mountpoint).or_warn();
+      }
     }
   }
 

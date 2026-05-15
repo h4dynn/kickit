@@ -20,8 +20,8 @@ pub static TARGET: OnceLock<self::target::Target> = OnceLock::new();
 pub static TARGET_NAME: OnceLock<String> = OnceLock::new();
 // If set to true, master log entries won't be shown on console
 pub static QUIET: OnceLock<bool> = OnceLock::new();
-
-pub static SERVICE_WATCHERS: OnceLock<Vec<tokio::task::JoinHandle<()>>> = OnceLock::new();
+// Tells the service watcher to not care if a service is killed, set by `poweroff(_, _)`
+pub static POWER_OFF: OnceLock<bool> = OnceLock::new();
 
 // The default shell will be bash unless the "posix_sh" feature is set
 pub(crate) const SHELL: &str =

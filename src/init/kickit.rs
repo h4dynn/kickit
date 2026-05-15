@@ -213,7 +213,7 @@ async fn main()
 {
   use std::{thread::park, env};
   use tokio::runtime::Runtime as AsyncRuntime;
-  use kickit::{init::{target, cmdlineParam, SERVICE_WATCHERS}, socket, socket::Open};
+  use kickit::{init::{target, cmdlineParam}, socket, socket::Open};
 
   let rt: AsyncRuntime = AsyncRuntime::new().into_trace(Error::Unknown).handle();
 
@@ -275,22 +275,11 @@ async fn main()
   // Open our sockets
   socks!(rt, socket::Core, socket::Log, socket::Power);
 
-  let mut watchers = Vec::<task::JoinHandle<()>>::new();
   // Startup our services & wait for it to finish
   for service in (services)
   {
-    /*
-     * TO-DO: Cannot use service after this because it gets moved.
-     * We also can't implement Clone because `Child` doesn't implement it.
-     * This is gonna make killing a service really difficult
-     */
-    if let Some(watcher) = service.start().handle()
-    {
-      watchers.push(watcher);
-    }
+    service.start().handle();
   }
-
-  oncelock! { let SERVICE_WATCHERS = watchers }.handle();
 
   // Block indefinitely
   park();

@@ -1,6 +1,6 @@
 //! Service implementation
 
-use std::{fs, io, process::{Command, Stdio, Child}, sync::OnceLock, path::PathBuf};
+use std::{fs, io, process::{Command, Child}, sync::OnceLock, path::PathBuf};
 use serde::Deserialize;
 use crate::{init::init_console::{Error, ExtendWithContext, ErrorResult, Result},
       console::affirm, file_path, path};
@@ -169,7 +169,7 @@ impl Service
   {
     use nix::unistd::{chown, Uid, Gid};
     use std::{fs::{File, Permissions}, os::unix::fs::PermissionsExt,
-              io::{Write, BufRead, Cursor, BufReader, pipe}};
+              io::{Write, BufRead, BufReader, pipe}};
 
     // An empty zstd file, created from /dev/null (`$ zstd -1c < /dev/null | xxd`)
     const EMPTY_ZSTD: [u8; 13] = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01, 0x00,
@@ -223,6 +223,10 @@ impl Service
       fs::set_permissions(path, Permissions::from_mode(run.mode)).into_trace(Error::RunFsFail)?;
     }
 
+    /*
+     * Opening a pipe here allows us to read both stderr/stdout as one (like in bash),
+     * since some services will output logs to stdout & some to stderr
+     */
     let (reader, writer) = pipe().into_trace(Error::Unknown)?;
     /*
      * Based on the service's pattern we either spawn it in the background
@@ -248,21 +252,22 @@ impl Service
         // Transfer the process to our service
         self.process = Some(process);
 
-        if let Some(log) = self.log.get_mut()
-        {
-          log.reader = Some(reader);
-          self.log("Started service", true)?;
-        }
+        let log = self.log.get_mut().ok_or(Error::Unknown.trace("Log is missing!").context(&self.name))?;
+        // Link the reader to the log
+        log.reader = Some(reader);
+
+        self.log("Started service", true)?;
       },
       RunOnce =>
       {
         // Start the service's process & wait for it to finish
-        let process = Command::new(&self.exec[0]).args(args).stderr(Stdio::piped()).output()
+        let process = Command::new(&self.exec[0]).args(args)
+                        .stderr(writer.try_clone().into_trace(Error::Unknown)?)
+                        .stdout(writer)
+                        .output()
                         .into_trace(Error::ServiceUp).context(&self.name)?;
 
-        let stderr = BufReader::new(Cursor::new(process.stderr));
-
-        for maybeLine in (stderr.split(b'\n'))
+        for maybeLine in (BufReader::new(reader).split(b'\n'))
         {
           let line = maybeLine.into_trace(Error::Format).context(format!("Invalid input for {}", self.name))?;
           let stringLine = String::from_utf8(line).into_trace(Error::Format).context(&self.name)?;
@@ -311,6 +316,7 @@ impl Service
     use crate::init::{init_console::status, service::Pattern::RunOnce};
 
     affirm!(self.state == Up, Error::ServiceDown.trace("Already down").context(&self.name));
+    // RunOnce services are already dead so we can't kill them
     affirm!(self.pattern != RunOnce, Error::ServiceDown.trace("Invalid pattern").context(&self.name));
 
     status!("Killing service: {}", &self.name);
@@ -339,7 +345,8 @@ impl Service
   pub fn watch(&mut self) -> Result<()>
   {
     use std::{io::{Read, BufReader}, thread::sleep, time::Duration};
-    use crate::state::state;
+    use crate::{state::state, console::ReturnError};
+    use super::POWER_OFF;
 
     loop {
       /*
@@ -353,8 +360,7 @@ impl Service
         let mut tester = [0; 1];
         let mut log = String::new();
 
-        let mut logReader = logger.reader
-                              .as_ref().ok_or(Error::Unknown.trace("Log reader missing!"))?;
+        let mut logReader = logger.reader.as_ref().ok_or(Error::Unknown.trace("Logger missing!"))?;
 
         /*
          * Read stderr and take one byte; if this fails then we know there
@@ -393,12 +399,34 @@ impl Service
 
       if (state!().is_ok())
       {
-        // Continue onto next loop if warned instead of aborted
-        let Ok(spec) = fs::read_to_string(FindPath::path(self, Path::Pid)?)
-                          else { self.died()?; continue; };
+        // Make sure our service is running okay (Z = zombie / X = killed)
+        if let Ok(spec) = fs::read_to_string(FindPath::path(self, Path::Pid)?) &&
+            (!matches!(spec.split(' ').nth(2), Some("Z" | "X")))
+        {
+          // Don't need to do anything
+          continue;
+        }
+        // Power off signal sent by `poweroff(_, _)` function
+        if let Some(powerOff) = POWER_OFF.get() && (*powerOff)
+        {
+          // Don't want to trigger an error if we are powering off - this is expected behavoir
+          return Ok(())
+        }
 
-        // The third value in the file shows the current state (e.g. Z for zombie)
-        if (matches!(spec.split(' ').nth(2), Some("Z" | "X"))) { self.died()? }
+        // Try to stop it or return error if that fails
+        self.down()?;
+
+        let error = Error::ServiceNotRunning.trace("Service died!").context(&self.name);
+
+        if (self.optional)
+        {
+          // We don't want an optional service throwing a global error
+          error.warn();
+        }
+        else {
+          // uh-oh very bad
+          return Err(error)
+        }
       }
     }
   }
@@ -513,32 +541,6 @@ impl Service
     {
       Some(i) => Ok(i.id()),
       None => Err(Error::ServiceAccess.into())
-    }
-  }
-
-  /**
-    * # Errors
-    * * Service was killed/zombified and isn't optional
-    * * Service couldn't be killed gracefully (`.down()` method)
-    */
-  #[doc(hidden)]
-  #[inline]
-  fn died(&mut self) -> Result<()>
-  {
-    use crate::console::ReturnError;
-
-    // Try to stop it or return error if that fails
-    self.down()?;
-
-    let error = Error::ServiceNotRunning.trace("Service died!").context(&self.name);
-
-    if (self.optional)
-    {
-      error.warn();
-      Ok(())
-    }
-    else {
-      Err(error)
     }
   }
 }
