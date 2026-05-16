@@ -2,7 +2,47 @@
 
 use tokio::net::UnixStream;
 use crate::{socket::{Socket, Core, Log, Power},
-            init::init_console::{Error, ErrorResult}, console::HandleError};
+              init::console::{Result, Error, ErrorResult},
+              console::{HandleError, ExtendWithContext}};
+
+/*
+ * Include the open_sock() method as a seperate trait with a blanket
+ * implementation as this keeps the implementation universal
+ * and stops custom implementations
+ */
+pub trait Open: Socket + Sync + 'static
+{
+  fn open_sock(&'static self) -> impl Future<Output = Result<()>> + Send
+  {
+    async move
+    {
+      use std::{os::unix::fs::PermissionsExt, fs::{Permissions, set_permissions}};
+      use tokio::net::UnixSocket;
+
+      let path = self.path();
+      let permissions = Permissions::from_mode(if (Self::PRIVATE) { 0o600 } else { 0o666 });
+
+      let sock = UnixSocket::new_stream().into_trace(Error::Socket)?;
+      // Bind (start) our socket here
+      sock.bind(&path).into_trace(Error::RunFsFail).context(path.display())?;
+
+      /*
+       * thanks <https://users.rust-lang.org/t/how-to-manage-permissions-of-a-unixlistener/31039/8>
+       * for having an answer for this it really hurt my head
+       */
+      set_permissions(&path, permissions).into_trace(Error::RunFsFail).context(path.display())?;
+
+      // Set max listeners at a time to 1
+      let listener = sock.listen(Self::MAX_LISTENERS).into_trace(Error::Socket)?;
+
+      while let Ok((stream, _)) = listener.accept().await
+      {
+        self.handler(stream).await;
+      }
+      Ok(())
+    }
+  }
+}
 
 /*
  * Provide a failure byte to the socket peer as a signal that something
@@ -52,6 +92,7 @@ impl Socket for Core
   const NAME: &str = "Core";
   // All users should be able to access this socket as it reports no private data
   const PRIVATE: bool = false;
+  const MAX_LISTENERS: u32 = 3;
 
   async fn handler(&self, stream: UnixStream)
   {
@@ -75,7 +116,7 @@ impl Socket for Core
         stream.try_write(&[state!() as u8])
       },
       // Add a newline byte, this is our EOL
-      Self::VERSION => stream.try_write(&[crate::VERSION.to_string().as_bytes(), b"\n"].concat()),
+      Self::VERSION => stream.try_write(&[env!("CARGO_PKG_VERSION").as_bytes(), b"\n"].concat()),
       Self::TARGET =>
       {
         // Try open the OnceLock here
@@ -104,7 +145,7 @@ impl Socket for Log
 
   async fn handler(&self, stream: UnixStream)
   {
-    use crate::init::init_console::MASTER_LOG;
+    use crate::init::console::MASTER_LOG;
 
     stream_sanity!(stream => Readable + Writable);
     let mut input = [0u8];
@@ -118,12 +159,11 @@ impl Socket for Log
     if (input[0] == Self::MASTER) && let Ok(log) = MASTER_LOG.lock()
     {
       // Our log is a vector of strings, so we seperate each member by a newline
-      stream.try_write(log.join("\n").as_bytes())
+      stream.try_write(log.join("\n").as_bytes()).into_trace(Error::Socket).or_warn();
     }
     else {
-      stream.try_write(&[0x0f])
+      fail!(stream, 0x0f);
     }
-      .into_trace(Error::Socket).or_warn();
   }
 }
 
@@ -133,9 +173,10 @@ impl Socket for Power
 
   async fn handler(&self, stream: UnixStream)
   {
-    use crate::init::power::{poweroff, Mode};
+    use crate::init::power::{poweroff, forcePoweroff, Mode};
 
     stream_sanity!(stream => Readable + Writable);
+    // Read 1 byte only
     let mut input = [0u8];
 
     if (stream.try_read(&mut input).is_err())
@@ -147,8 +188,13 @@ impl Socket for Power
     {
       Self::SHUTDOWN => poweroff(Mode::Shutdown).or_warn(),
       Self::REBOOT => poweroff(Mode::Reboot).or_warn(),
+      Self::FORCE_SHUTDOWN => forcePoweroff(Mode::Shutdown).or_warn(),
+      Self::FORCE_REBOOT => forcePoweroff(Mode::Reboot).or_warn(),
       // Write error byte to socket- unexpected input
       _ => { fail!(stream, 0x0f); }
     }
   }
 }
+
+// Blanket implementation
+impl<S: Socket + Sync + 'static> Open for S {}

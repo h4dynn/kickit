@@ -5,7 +5,7 @@ extern crate serde;
 extern crate toml;
 extern crate nix;
 
-pub mod init_console;
+pub mod console;
 pub mod mount;
 pub mod service;
 pub mod target;
@@ -13,7 +13,8 @@ pub mod socket;
 pub mod power;
 
 use std::sync::OnceLock;
-use self::init_console::{Error, Result, ExtendWithContext};
+use crate::console::ExtendWithContext;
+use self::console::{Error, Result};
 
 // Once the target is sourced its configuration will be stored here
 pub static TARGET: OnceLock<self::target::Target> = OnceLock::new();
@@ -47,7 +48,7 @@ pub(crate) const SHELL: &str =
 pub fn cmdlineParam(param: &str) -> Result<Option<String>>
 {
   use std::{fs, path::PathBuf};
-  use crate::init::init_console::ErrorResult;
+  use crate::init::console::ErrorResult;
 
   // Read the cmdline from procfs
   let cmdline = fs::read_to_string(PathBuf::from("/proc/cmdline"))

@@ -1,7 +1,8 @@
 //! Mount implementation layered over the `nix` crate
 
 use crate::display_enum;
-use std::fmt;
+use super::console::Result;
+use std::{fmt, fmt::Display, path::Path};
 
 // Mount flags & their corresponding bit value (MsFlags)
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -14,6 +15,18 @@ pub enum Flag
   Remount = 32,
   Bind = 4096,
   Private = 1 << 18
+}
+
+pub enum UnmountFlag
+{
+  // Unmount even if busy, pretty damn dangerous (nfs only)
+  Force = 1,
+  // Ignore checks & unmount anyway
+  Lazy = 2,
+  // Mark the mountpoint as expired
+  Expire = 4,
+  // Don't follow symlinks to their source
+  NoFollow = 8
 }
 
 display_enum!
@@ -29,32 +42,34 @@ display_enum!
 // Basic type alias
 pub type Opt = String;
 
-#[derive(PartialEq, Eq, Clone, Debug, Default)]
-pub struct Flags(pub Vec<Flag>);
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
+pub struct Flags(pub u64);
 
 #[derive(PartialEq, Eq, Clone, Debug, Default)]
 pub struct Opts(pub Vec<Opt>);
+
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
+pub struct UnmountFlags(pub i32);
 
 impl From<Flags> for nix::mount::MsFlags
 {
   fn from(flags: Flags) -> Self
   {
-    // The default flags are just 0 (none)
-    let mut out_flags: u64 = 0;
-
-    for flag in (flags.0)
-    {
-      // Combine the flags
-      out_flags += flag as u64;
-    }
-
-    Self::from_bits_retain(out_flags)
+    Self::from_bits_retain(flags.0)
   }
 }
 
-impl fmt::Display for Opts
+impl From<UnmountFlags> for nix::mount::MntFlags
 {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error>
+  fn from(flags: UnmountFlags) -> Self
+  {
+    Self::from_bits_retain(flags.0)
+  }
+}
+
+impl Display for Opts
+{
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
   {
     let mut str_opts = String::new();
 
@@ -72,14 +87,6 @@ impl fmt::Display for Opts
   }
 }
 
-impl Flags
-{
-  pub fn push(&mut self, flag: Flag)
-  {
-    self.0.push(flag);
-  }
-}
-
 #[macro_export]
 macro_rules! mountflags
 {
@@ -90,7 +97,7 @@ macro_rules! mountflags
       let mut flags = Flags::default();
 
       $(
-        flags.0.push($flag.into());
+        flags.0 += $flag as u64;
       )*
 
       flags
@@ -122,6 +129,27 @@ macro_rules! mountopts
 }
 pub use crate::mountopts as mountopts;
 
+#[macro_export]
+macro_rules! unmountflags
+{
+  [$($flag: tt),*] =>
+  {
+    {
+      use $crate::init::mount::UnmountFlags;
+      let mut flags = UnmountFlags::default();
+
+      $(
+        flags.0 += $flag as i32;
+      )*
+
+      flags
+    }
+  };
+
+  [] => { UnmountFlags::default() };
+}
+pub use crate::unmountflags as unmountflags;
+
 /**
   * # Errors
   *
@@ -129,9 +157,9 @@ pub use crate::mountopts as mountopts;
  **/
 // Frontend for nix library's mount function
 pub fn mount(from: Option<&str>, to: &str, fsType: Option<&str>, flags: Flags, opts: Option<&Opts>)
-  -> Result<(), crate::init::init_console::ErrorTrace>
+  -> Result<()>
 {
-  use crate::init::init_console::{Error, ErrorResult};
+  use crate::init::console::{Error, ErrorResult};
 
   /*
    * We have to do a manual map here because if we map like:
@@ -161,11 +189,19 @@ pub fn mount(from: Option<&str>, to: &str, fsType: Option<&str>, flags: Flags, o
   *
   * - Couldn't unmount the device
  **/
-pub fn unmount(dest: &str) -> Result<(), crate::init::init_console::ErrorTrace>
+pub fn unmount(dest: &str, maybeFlags: Option<UnmountFlags>) -> Result<()>
 {
-  use crate::init::init_console::{Error, ErrorResult};
+  use crate::init::console::{Error, ErrorResult};
 
-  nix::mount::umount(dest).into_trace(Error::SysFsUnmount)?;
+  if let Some(flags) = maybeFlags
+  {
+    nix::mount::umount2(dest, flags.into())
+  }
+  else {
+    nix::mount::umount(dest)
+  }
+    .into_trace(Error::SysFsUnmount)?;
+
   Ok(())
 }
 
@@ -175,11 +211,10 @@ pub fn unmount(dest: &str) -> Result<(), crate::init::init_console::ErrorTrace>
   * - Couldn't read from /proc/mounts
  **/
 // Check if a path is a mountpoint
-pub fn mounted<P: AsRef<std::path::Path> + std::fmt::Display>(mountpoint: P)
-  -> Result<bool, crate::init::init_console::ErrorTrace>
+pub fn mounted(mountpoint: impl AsRef<Path> + Display) -> Result<bool>
 {
   use std::fs;
-  use crate::init::init_console::{Error, ErrorResult};
+  use crate::init::console::{Error, ErrorResult};
 
   // Cycle through potential matches from /proc/mounts
   for candMount in (fs::read_to_string("/proc/mounts").into_trace(Error::FileNotFound)?.split('\n'))

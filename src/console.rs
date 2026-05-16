@@ -1,5 +1,6 @@
 //! General implementation for logging, errors and status updates
 
+use std::fmt::Display;
 use crate::display_enum;
 
 /*
@@ -21,6 +22,17 @@ pub trait HandleError: Sized
   fn handle(self) -> Self::OkType;
   // Do nothing with OK result, warn on error
   fn or_warn(self);
+}
+
+pub trait ExtendWithContext<OkType, ErrorType>
+{
+  /**
+    * Add context to an existing trace error
+    *
+    * # Errors
+    * - Result is of error variant
+    */
+  fn context(self, context: impl Display) -> Result<OkType, ErrorType>;
 }
 
 pub enum Colour { RESET, BOLD, RED, ORANGE, GREEN }

@@ -8,20 +8,20 @@ use tokio::task;
 use nix::unistd::getuid;
 use kickit::{
   console::Colour, console::{ReturnError, HandleError},
-  init::{init_console::{Error, ErrorResult, Result, StdResult, status, stall},
+  init::{console::{Error, ErrorResult, Result, StdResult, status, stall},
             service::Service, TARGET, TARGET_NAME, QUIET}, oncelock};
 
 trait StartService
 {
-  fn start(self) -> Result<Option<task::JoinHandle<()>>>;
+  fn start(self) -> Result<()>;
 }
 
 impl StartService for Service
 {
   #[inline]
-  fn start(mut self) -> Result<Option<task::JoinHandle<()>>>
+  fn start(mut self) -> Result<()>
   {
-    use kickit::{init::service::Pattern::{Standard, Forking, RunOnce}, state};
+    use kickit::{init::service::Pattern::{Standard, Forking}, state};
 
     status!("Starting service: {}", self.name);
 
@@ -43,12 +43,11 @@ impl StartService for Service
       }
     }
 
-    Ok(match (self.pattern)
+    if (matches!(self.pattern, Standard | Forking))
     {
-      // Watch the service to update logs & make sure it isn't killed
-      Standard | Forking => Some(task::spawn(async move { self.watch().handle() })),
-      RunOnce => None
-    })
+      task::spawn(async move { self.watch().handle() });
+    }
+    Ok(())
   }
 }
 
@@ -62,7 +61,7 @@ impl StartService for Service
 #[inline]
 fn sanity(sideInit: bool) -> StdResult<(), Error>
 {
-  use kickit::{console::affirm, init::init_console::warn};
+  use kickit::{console::affirm, init::console::warn};
 
   // If /run/kickit is already there then another kickit is running
   affirm!(fs::metadata("/run/kickit").is_err(), Error::AlreadyRunning);
@@ -157,7 +156,7 @@ fn mountSysFilesystems() -> Result<()>
     ($from: tt, $to: tt, $fsType: tt, $flags: expr) =>
     {
       // Check if each destination is already mounted, and if so unmount it
-      if !(mounted($to)? && unmount($to).is_err())
+      if !(mounted($to)? && unmount($to, None).is_err())
       {
         mount(Some($from), $to, Some($fsType), $flags, None)?
       }
@@ -213,7 +212,7 @@ async fn main()
 {
   use std::{thread::park, env};
   use tokio::runtime::Runtime as AsyncRuntime;
-  use kickit::{init::{target, cmdlineParam}, socket, socket::Open};
+  use kickit::{init::{target, cmdlineParam, socket::Open}, socket};
 
   let rt: AsyncRuntime = AsyncRuntime::new().into_trace(Error::Unknown).handle();
 

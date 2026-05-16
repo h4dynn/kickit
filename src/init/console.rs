@@ -2,7 +2,7 @@
 
 use std::{sync::Mutex, fmt::Display, io};
 use thiserror::Error;
-use crate::{console::Colour, console::ReturnError, state::InitState, display_enum};
+use crate::{console::{Colour, ReturnError, ExtendWithContext}, state::InitState, display_enum};
 
 pub enum Marker
 {
@@ -96,17 +96,6 @@ pub trait ErrorResult<OkType, ErrType> where ErrType: Display
   fn into_trace(self, errorKind: Error) -> Result<OkType>;
 }
 
-pub trait ExtendWithContext<OkType>
-{
-  /**
-    * Add context to an existing trace error
-    *
-    * # Errors
-    * - Result is of error variant
-    */
-  fn context(self, context: impl Display) -> Result<OkType>;
-}
-
 // A traceless, unknown error is the default
 impl Default for ErrorTrace
 {
@@ -121,14 +110,14 @@ macro_rules! innerFatal
   // Implementation for a tracless error, just displays the provided message
   (@traceless $error: tt) =>
   {
-    use $crate::init::init_console::Marker::Fatal;
+    use $crate::init::console::Marker::Fatal;
 
     log!(format!("{}{} {}{}", Fatal, Colour::BOLD, $error, Colour::RESET));
     $error.exit();
   };
   (@trace $error: tt) =>
   {
-    use $crate::init::init_console::Marker::Fatal;
+    use $crate::init::console::Marker::Fatal;
 
     log!(format!("{}{} {}{}{}", Fatal, Colour::BOLD, $error.kind, Colour::RESET,
                   if let Some(ref c) = $error.context { format!(": {c}") } else { String::new() }));
@@ -225,9 +214,9 @@ impl ErrorTrace
   }
 }
 
-impl<T> ExtendWithContext<T> for Result<T>
+impl<OkType> ExtendWithContext<OkType, ErrorTrace> for Result<OkType>
 {
-  fn context(self, context: impl Display) -> Result<T>
+  fn context(self, context: impl Display) -> Result<OkType>
   {
     match (self)
     {
@@ -315,7 +304,7 @@ macro_rules! log
   ($new: expr) =>
   {
     {
-      use $crate::init::{init_console::MASTER_LOG, QUIET};
+      use $crate::init::{console::MASTER_LOG, QUIET};
 
       // Get the oncelock or fallback to false if not already set
       let quiet = QUIET.get().unwrap_or(&false);
@@ -366,7 +355,7 @@ macro_rules! status
   ($($message: tt)*) =>
   {
     {
-      use $crate::init::init_console::{log, Marker::Status};
+      use $crate::init::console::{log, Marker::Status};
       log!(format!("{} {}", Status, format!($($message)*)))
     }
   };
@@ -379,7 +368,7 @@ macro_rules! warn
   ($($message: tt)*) =>
   {
     {
-      use $crate::init::init_console::{log, Marker::Warn};
+      use $crate::init::console::{log, Marker::Warn};
       log!(format!("{} {}{}{}", Warn, Colour::BOLD, format!($($message)*), Colour::RESET))
     }
   };

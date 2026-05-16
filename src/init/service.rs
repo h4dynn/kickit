@@ -2,8 +2,8 @@
 
 use std::{fs, io, process::{Command, Child}, sync::OnceLock, path::PathBuf};
 use serde::Deserialize;
-use crate::{init::init_console::{Error, ExtendWithContext, ErrorResult, Result},
-      console::affirm, file_path, path};
+use crate::{init::console::{Error, ErrorResult, Result},
+      console::{affirm, ExtendWithContext}, file_path, path};
 
 pub static UP_SERVICES: OnceLock<Vec<&str>> = OnceLock::new();
 
@@ -247,8 +247,8 @@ impl Service
         let mut pidFile = File::create_new(path!("/run/kickit/service", &self.name, "pid"))
                                   .into_trace(Error::RunFsFail)?;
 
-        // Write the PID in text
-        pidFile.write_all(process.id().to_string().as_bytes()).into_trace(Error::RunFsFail)?;
+        // Write the PID in little-endian ordered bytes
+        pidFile.write_all(&process.id().to_le_bytes()).into_trace(Error::RunFsFail)?;
         // Transfer the process to our service
         self.process = Some(process);
 
@@ -313,7 +313,7 @@ impl Service
   #[inline]
   pub(crate) fn down(&mut self) -> Result<()>
   {
-    use crate::init::{init_console::status, service::Pattern::RunOnce};
+    use crate::init::{console::status, service::Pattern::RunOnce};
 
     affirm!(self.state == Up, Error::ServiceDown.trace("Already down").context(&self.name));
     // RunOnce services are already dead so we can't kill them
@@ -446,7 +446,7 @@ impl Service
   pub fn log(&mut self, new: &str, fromInit: bool) -> Result<()>
   {
     use std::{io::{Read, Seek, Cursor}, time::{SystemTime, UNIX_EPOCH}};
-    use crate::{state::state, init::init_console::{Marker::Service as Mark, log}, console::Colour};
+    use crate::{state::state, init::console::{Marker::Service as Mark, log}, console::Colour};
     use ruzstd::{decoding::StreamingDecoder, encoding::{compress, CompressionLevel}};
 
     // Don't send empty lines if they are found for whatever reason

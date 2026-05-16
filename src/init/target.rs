@@ -1,6 +1,6 @@
 //! Target configuration file sourcing
 
-use crate::{init::init_console::Result, path, file_path};
+use crate::{init::console::Result, path, file_path};
 
 // KTTargetSource is used for toml::from_str
 #[derive(serde::Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -32,7 +32,7 @@ pub struct Target
  **/
 pub fn source(name: String) -> Result<Target>
 {
-  use crate::{init::init_console::{Error, ErrorResult}};
+  use crate::{init::console::{Error, ErrorResult}};
   use std::fs;
 
   // Read toml contents from target config to string
@@ -52,7 +52,7 @@ pub fn source(name: String) -> Result<Target>
 
   if (sourcedTarget.debug_dump == Some(true) && !cfg!(debug_assertions))
   {
-    use crate::{init::init_console::warn, console::Colour};
+    use crate::{init::console::warn, console::Colour};
     // This will have no effect on release builds
     warn!("debug dump is enabled in target '{name}', but you are using a release build");
   }

@@ -14,13 +14,16 @@ pub mod console;
 pub mod state;
 pub mod socket;
 
-use std::{fmt, fmt::Display, num::ParseIntError};
+use std::{fmt::Display, num::ParseIntError};
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug, Default)]
-pub enum Release { Stable, Testing, #[default] Unstable }
-
-#[derive(Eq, PartialEq, Copy, Clone, Debug, Default)]
-pub struct Version(u8, u8, u8, u8);
+pub enum Release
+{
+  Stable,
+  Testing,
+  #[default]
+  Unstable
+}
 
 /*
  * This alias makes things alot less repetative, e.g.:
@@ -34,20 +37,10 @@ pub struct Version(u8, u8, u8, u8);
 pub type Data = Vec<u8>;
 
 pub const RELEASE: Release = Release::Unstable;
-// Version is formatted as [Top].[Rel].[Lower]-[Increment]
-pub const VERSION: Version = Version(0, 1, 1, 2);
 // Where the important files for kickit live
 pub const PREFIX: &str = "/usr/lib/kickit";
 
 display_enum! { Release }
-
-impl Display for Version
-{
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
-  {
-    write!(f, "{}.{}.{}-{}", self.0, self.1, self.2, self.3)
-  }
-}
 
 /**
   * # Errors
@@ -88,7 +81,7 @@ impl Display for Version
 pub const PRETTY_VERSION: fn() -> String = ||
 [
   // Display version as a string
-  crate::VERSION.to_string(),
+  env!("CARGO_PKG_VERSION").to_owned(),
 
   if (crate::RELEASE == crate::Release::Stable)
   {

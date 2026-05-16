@@ -1,118 +1,67 @@
-//! Sockets for the runfs
+/*!
+ * ABI for kickit sockets
+ * Keep in mind this isn't the complete implementation, see `init::socket` and `ktctl::socket`
+ */
 
 use std::path::PathBuf;
 use tokio::net::UnixStream;
-use crate::init::init_console::{Error, ExtendWithContext, ErrorResult, Result};
 
-#[macro_export]
-macro_rules! socket_struct
-{
-  { $(pub $name: ident),* } =>
-  {
-    $(
-      #[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
-      pub struct $name;
-    )*
-  };
-}
-pub use crate::socket_struct as socket_struct;
-
-// The sockets- all of these will have Socket implemented
-socket_struct!
-{
-  pub Core, pub Log, pub Power
-}
+// Provides init state, version, target & PID
+#[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
+pub struct Core;
+// Provides the init's master log - not service logs
+#[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
+pub struct Log;
+// Interface for rebooting & shutting down
+#[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
+pub struct Power;
 
 // Limit by the static lifetime because Tokio spawning requires this
 #[doc = include_str!("../docs/Making_a_Socket.md")]
-pub trait Socket
+pub trait Socket: Send + 'static
 {
   /*
    * The name we will use for the socket in runfs, which will end up
    * being /run/kickit/io.<SOCK_NAME>
    */
   const NAME: &str;
-
   // Make the socket root-access only (mapped to private dir)
   const PRIVATE: bool = true;
+  // Max amount of listeners on this socket at a time
+  const MAX_LISTENERS: u32 = 1;
 
   // You may implement a custom method for a different path
   fn path(&self) -> PathBuf
   {
     use crate::file_path;
+
     // These are the default paths, used except for when a custom method is defined
     if (Self::PRIVATE)
     {
+      // This folder is root access only (0o600)
       file_path!(PathBuf::from("/run/kickit/private"), "io", Self::NAME)
     }
-    else
-    {
+    else {
+      // Can be accessed by anybody (0o666)
       file_path!(PathBuf::from("/run/kickit"), "io", Self::NAME)
     }
   }
 
   /*
+   * When the socket receives a new connection, this function is called
+   * to deal with it, where you can read the input with the UnixStream
+   *
    * (note): The handler should be completely errorless, since we don't
    * want a stream that all users can access that may cause an init
    * error from a simple user request. Instead return an error to the
-   * connected peer (e.g. 0x0f byte)
+   * connected peer (see the `init::socket::fail` macro)
    *
    * 'async' isn't specified here, instead a workaround (-> impl Future)
    * because the compiler suggests to use it so others can use
-   * auto-traits if needed (lint: `async_fn_in_trait`)
+   * auto-traits like Send if needed (lint: `async_fn_in_trait`)
    */
   fn handler(&'static self, stream: UnixStream) -> impl Future<Output = ()> + Send;
 }
-
-/*
- * Include the open_sock() method as a seperate trait with a blanket
- * implementation as this keeps the implementation universal
- * and stops custom implementations
- */
-pub trait Open: Socket + Sync + 'static
-{
-  fn open_sock(&'static self) -> impl Future<Output = Result<()>> + Send
-  {
-    async move
-    {
-      use std::{os::unix::fs::PermissionsExt, fs::{Permissions, set_permissions}};
-      use tokio::net::UnixSocket;
-
-      let path = self.path();
-      let permissions = Permissions::from_mode(
-      {
-        if (Self::PRIVATE)
-        {
-          0o600
-        }
-        else {
-          0o666
-        }
-      });
-
-      let sock = UnixSocket::new_stream().into_trace(Error::Socket)?;
-      // Bind (start) our socket here
-      sock.bind(&path).into_trace(Error::RunFsFail).context(path.display())?;
-
-      /*
-       * thanks <https://users.rust-lang.org/t/how-to-manage-permissions-of-a-unixlistener/31039/8>
-       * for having an answer for this it really hurt my head
-       */
-      set_permissions(&path, permissions).into_trace(Error::RunFsFail).context(path.display())?;
-
-      let listener = sock.listen(1).into_trace(Error::Socket)?;
-
-      while let Ok((stream, _)) = listener.accept().await
-      {
-        self.handler(stream).await;
-      }
-      Ok(())
-    }
-  }
-}
-
-// Blanket implementation
-impl<S: Socket + Sync + 'static> Open for S {}
 
 /*
  * The bytes that we use for input requeats for the socket, we do
@@ -121,20 +70,22 @@ impl<S: Socket + Sync + 'static> Open for S {}
  */
 impl Core
 {
-  pub const STATE: u8 = 0x4D;
-  pub const VERSION: u8 = 0x1C;
-  pub const TARGET: u8 = 0x7E;
-  pub const PID: u8 = 0xF1;
+  pub const STATE: u8 = 0xf9;
+  pub const VERSION: u8 = 0xc4;
+  pub const TARGET: u8 = 0xa0;
+  pub const PID: u8 = 0xf1;
 }
 
 impl Log
 {
   // The init master log
-  pub const MASTER: u8 = 0x6C;
+  pub const MASTER: u8 = 0xf5;
 }
 
 impl Power
 {
-  pub const SHUTDOWN: u8 = 0xF2;
-  pub const REBOOT: u8 = 0x7E;
+  pub const SHUTDOWN: u8 = 0xe0;
+  pub const REBOOT: u8 = 0xd7;
+  pub const FORCE_SHUTDOWN: u8 = 0xfd;
+  pub const FORCE_REBOOT: u8 = 0xe3;
 }

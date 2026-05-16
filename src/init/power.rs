@@ -1,7 +1,7 @@
 //! power.rs - Shutdown & reboot safely
 
 use std::ffi::OsString;
-use super::init_console::{Error, ErrorResult, Result};
+use super::console::{Error, ErrorResult, Result};
 use nix::sys::reboot::RebootMode;
 
 pub enum Mode
@@ -24,6 +24,20 @@ impl Into<RebootMode> for Mode
   }
 }
 
+// Not recommended- skip poweroff procedures like unmounting & stopping services
+/**
+  * # Errors
+  *
+  * * Failed to power-off/reboot with `nix::sys::reboot::reboot`
+  */
+pub fn forcePoweroff(mode: Mode) -> Result<()>
+{
+  use nix::sys::reboot::reboot;
+
+  reboot(mode.into()).into_trace(Error::Unknown)?;
+  Ok(())
+}
+
 // Using `Result<!>` is experimental sadly
 /**
   * # Errors
@@ -32,12 +46,12 @@ impl Into<RebootMode> for Mode
   * * Failed to read from /run/kickit/service,
   * * Failed to parse the PID file as it isn't numeric,
   * * Failed to kill a service
-  * * Failed to reboot with `nix::reboot::reboot`
+  * * Failed to reboot with `nix::sys::reboot::reboot`
   */
 pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
 {
-  use crate::{path, console::{ReturnError, HandleError}, oncelock};
-  use super::{POWER_OFF, mount::unmount, init_console::status};
+  use crate::{path, console::{Colour, HandleError, ReturnError}, oncelock};
+  use super::{POWER_OFF, mount::{unmount, unmountflags, UnmountFlag::Lazy}, console::{status, warn}};
   use nix::{unistd::Pid, sys::{reboot::reboot, signal::{kill, Signal}}};
   use std::{fs, path::PathBuf};
 
@@ -80,7 +94,7 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
     {
       err.warn();
       // If that doesn't work we use SIGKILL
-      kill(Pid::from_raw(pid.cast_signed()), Some(Signal::SIGKILL)).into_trace(Error::Unknown)?;
+      kill(Pid::from_raw(pid.cast_signed()), Some(Signal::SIGKILL)).into_trace(Error::Unknown).or_warn();
     }
   }
 
@@ -93,12 +107,19 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
     match (mountpoint)
     {
       // These are special system filesystems, unmounting them would be bad
-      "/dev" | "/dev/pts" | "/proc" | "/sys" | "/sys/fs/cgroup" => (),
+      "/dev" | "/dev/pts" | "/proc" | "/sys" | "/sys/fs/cgroup" | "/run" => (),
       // Hopefully safe to unmount
       _ =>
       {
         status!("Unmounting filesystem: {mountpoint}");
-        unmount(mountpoint).or_warn();
+
+        if let Err(error) = (unmount(mountpoint, None))
+        {
+          error.warn();
+          warn!("Failed to unmount filesystem, it will be lazily unmounted: {mountpoint}");
+          // We don't want to do this but this is a last resort
+          unmount(mountpoint, Some(unmountflags!(Lazy))).or_warn();
+        }
       }
     }
   }
