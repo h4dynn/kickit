@@ -26,6 +26,8 @@ jobs:
       - name: Build kickit
         run: |
           export PATH=$HOME/.xbps/usr/bin:$PATH
+          # workaround for "/run/self/uid_map: Operation not permitted"
+          sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
           cd package
           ./xbps-src pkg kickit
 
