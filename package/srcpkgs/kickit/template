@@ -6,8 +6,12 @@ short_desc="A robust & simple init system"
 maintainer="h4dynn <h4dynn@github.com>"
 license="GPL-3.0-or-later"
 homepage="https://github.com/h4dynn/kickit"
-distfiles="https://github.com/h4dynn/kickit/archive/refs/heads/main.tar.gz"
-checksum=118afd604f08d6bde72ab6890628689fba9c0fa6e25b0776a4831c4ca0f84070
+
+do_fetch()
+{
+  git clone https://github.com/h4dynn/kickit.git
+  cd kickit
+}
 
 do_build()
 {
