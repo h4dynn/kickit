@@ -18,8 +18,14 @@ jobs:
           cd package
           ./xbps-src-setup.sh
 
+      - name: Fetch xbps binaries
+        run: |
+          mkdir -m0755 ~/.xbps
+          curl -#Lo- http://repo-default.voidlinux.org/static/xbps-static-latest.x86_64-musl.tar.xz | unxz | tar -xC ~/.xbps
+
       - name: Build kickit
         run: |
+          export PATH=$HOME/.xbps/usr/bin:$PATH
           cd package
           ./xbps-src pkg kickit
 
