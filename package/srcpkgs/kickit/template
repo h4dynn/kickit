@@ -1,0 +1,27 @@
+pkgname=kickit
+version=0.1.0
+revision=1
+makedepends="cargo"
+short_desc="A robust & simple init system"
+maintainer="h4dynn <h4dynn@github.com>"
+license="GPL-3.0-or-later"
+homepage="https://github.com/h4dynn/kickit"
+distfiles="https://github.com/h4dynn/kickit/archive/refs/heads/main.tar.gz"
+checksum=118afd604f08d6bde72ab6890628689fba9c0fa6e25b0776a4831c4ca0f84070
+
+do_build()
+{
+  cargo build --release
+}
+
+do_install()
+{
+  mkdir -vpm0755 "$DESTDIR/usr/bin" \
+                  "$DESTDIR/usr/lib/kickit/service" \
+                  "$DESTDIR/usr/lib/kickit/target"
+
+  install -vm0755 ./target/release/kickit "$DESTDIR/usr/lib/kickit/kickit"
+  install -vm0755 ./target/release/ktctl "$DESTDIR/usr/bin/ktctl"
+  install -vm0755 ./src/service-helpers/agetty.sh "$DESTDIR/usr/lib/kickit/agetty.sh"
+  #install -vm0755 ./src/service-helpers/udev.sh "$DESTDIR/usr/lib/kickit/udev.sh"
+}

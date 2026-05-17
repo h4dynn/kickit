@@ -17,13 +17,18 @@ chrono = "0.4.42"
 nix = { version = "0.30.1", features = ["user", "fs", "process", "signal", "mount", "reboot"] }
 thiserror = "2.0.17"
 ruzstd = "0.8.3"
+# Optional- debug memory heap analysis
+dhat = { version = "0.3.3", optional = true }
 
 [lib]
-crate-type = ["dylib", "lib"]
+crate-type = ["cdylib", "rlib"]
 
 [profile.release]
 debug = false
-strip = true
+strip = "symbols"
+opt-level = 3
+codegen-units = 16
+
 
 [features]
 # Bypass function that checks if pid 1 is kickit
@@ -31,6 +36,8 @@ strip = true
 bypass_init_check = []
 # Use POSIX shell (/bin/sh) instead of bash
 posix_sh = []
+# Use the dhat heap profiler - for debugging memory usage
+dhat_heap = ["dhat"]
 
 [[bin]]
 # The init program- install to /usr/lib/kickit/kickit & symlink to /usr/sbin/init

@@ -63,7 +63,7 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
     for maybeService in (fs::read_dir(PathBuf::from("/run/kickit/service")).into_trace(Error::RunFsFail)?)
     {
       let name = maybeService.into_trace(Error::Unknown)?.file_name();
-      let pid = path!("/run/kickit/service", &name, "pid");
+      let pidPath = path!("/run/kickit/service", &name, "pid");
 
       // Test if this is a RunOnce service & if so we don't need to do anything here
       if (path!("/run/kickit/service", &name, "exited").is_file())
@@ -71,9 +71,10 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
         continue
       }
 
-      // Read the string PID, and then try to read the u32 from it
-      let pid: u32 = fs::read_to_string(pid).into_trace(Error::RunFsFail)?
-                          .parse().into_trace(Error::Unknown)?;
+      // Read the little-endian ordered PID u32 bytes
+      let pid = u32::from_le_bytes(fs::read(pidPath).into_trace(Error::RunFsFail)?
+                  .try_into()
+                  .map_err(|_| Error::Format.trace("Bad pid contents!").context(&name.display()))?);
 
       inner.push((pid, name));
     }

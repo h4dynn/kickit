@@ -5,7 +5,29 @@ on: [push, workflow_dispatch]
 jobs:
   release:
     if: ${{ endsWith(github.event.head_commit.message, '(release)') || github.event_name == 'workflow_dispatch' }}
-    name: Build release
-    uses: ./.github/workflows/build.yml
-    with:
-      release: true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: 'main'
+
+      - name: Fetch xbps-src
+        run: |
+          cd package
+          ./xbps-src-setup.sh
+
+      - name: Build kickit
+        run: |
+          cd package
+          ./xbps-src pkg kickit
+
+      - name: Fetch artifacts
+        uses: actions/download-artifact@v6
+
+      - name: Upload package
+        uses: actions/upload-artifact@v5
+        with:
+          name: release
+          path: package/hostdir/binpkgs/main/*

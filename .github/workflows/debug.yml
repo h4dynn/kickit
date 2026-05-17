@@ -3,6 +3,28 @@ name: Build debug
 on: [push, workflow_dispatch]
 
 jobs:
-  release:
-    name: Build debug
-    uses: ./.github/workflows/build.yml
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get rust toolkit
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | bash -s -- -y
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: 'main'
+
+      - name: Build (debug)
+        run: cargo build
+
+      - name: Fetch artifacts
+        uses: actions/download-artifact@v6
+
+      - name: Upload artifacts (debug)
+        uses: actions/upload-artifact@v5
+        with:
+          name: debug
+          path: target/debug/*

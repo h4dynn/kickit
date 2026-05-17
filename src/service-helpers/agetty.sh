@@ -38,7 +38,7 @@ fi
 
 tty=0
 # C-style for loops are not supported in POSIX shell
-while [ $tty -le "$TTYS" ]
+while [ $tty -lt "$TTYS" ]
 do {
   tty=$((tty+1))
   echo "Opening tty ${tty}/${TTYS}" >&2
@@ -47,10 +47,5 @@ do {
 }
 done
 
-# Loop forever
-while :
-do {
-  # The max cap for the sleep binary
-  sleep 2073600
-}
-done
+# As long as our agettys are running, this script will never exit
+wait

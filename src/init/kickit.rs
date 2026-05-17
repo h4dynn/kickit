@@ -207,6 +207,10 @@ macro_rules! socks
   };
 }
 
+#[cfg(feature = "dhat_heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[tokio::main]
 async fn main()
 {

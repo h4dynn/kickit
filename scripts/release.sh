@@ -1,3 +1,3 @@
 #!/bin/bash -eufx
 # Build release version of kickit
-cargo build --release
+RUSTFLAGS='-C prefer-dynamic' cargo build --release
