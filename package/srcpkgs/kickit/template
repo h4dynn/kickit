@@ -1,7 +1,7 @@
 pkgname=kickit
 version=0.1.0
 revision=1
-makedepends="cargo"
+makedepends="cargo git"
 short_desc="A robust & simple init system"
 maintainer="h4dynn <h4dynn@github.com>"
 license="GPL-3.0-or-later"
