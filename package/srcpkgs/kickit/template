@@ -9,8 +9,7 @@ homepage="https://github.com/h4dynn/kickit"
 
 do_fetch()
 {
-  git clone https://github.com/h4dynn/kickit.git
-  cd kickit
+  git clone https://github.com/h4dynn/kickit.git "$wrksrc"
 }
 
 do_build()
@@ -20,6 +19,7 @@ do_build()
 
 do_install()
 {
+  cd kickit
   mkdir -vpm0755 "$DESTDIR/usr/bin" \
                   "$DESTDIR/usr/lib/kickit/service" \
                   "$DESTDIR/usr/lib/kickit/target"
