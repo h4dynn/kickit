@@ -4,7 +4,6 @@ on: [push, workflow_dispatch]
 
 jobs:
   release:
-    if: ${{ endsWith(github.event.head_commit.message, '(release)') || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -36,7 +35,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
         run: |
-          gh release create unstable -F CHANGELOG.md -R "h4dynn/kickit" -t "$(date +"%d %b %Y, %H:%M")" -p
+          mv -v package/hostdir/binpkgs/main/*.xbps .
+          gh release create unstable -F CHANGELOG.md -R "h4dynn/kickit" -t "$(date +"%d %b %Y, %H:%M")" -p *.xbps
 
       - name: Fetch artifacts
         uses: actions/download-artifact@v6
@@ -45,4 +45,4 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: release
-          path: package/hostdir/binpkgs/main/*
+          path: *.xbps
