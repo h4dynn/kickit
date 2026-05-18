@@ -40,7 +40,16 @@ pub const RELEASE: Release = Release::Unstable;
 // Where the important files for kickit live
 pub const PREFIX: &str = "/usr/lib/kickit";
 
-display_enum! { Release }
+display_enum!
+{
+  Release
+}
+
+// Convert a Vector that may be empty to an Option
+pub trait OptionEmptyVec: Sized
+{
+  fn empty_none(self) -> Option<Self>;
+}
 
 /**
   * # Errors
@@ -95,6 +104,20 @@ pub const PRETTY_VERSION: fn() -> String = ||
 ]
   // And join both of those together without a seperator
   .join("");
+
+impl<T> OptionEmptyVec for Vec<T>
+{
+  fn empty_none(self) -> Option<Self>
+  {
+    if (self.is_empty())
+    {
+      None
+    }
+    else {
+      Some(self)
+    }
+  }
+}
 
 // Get the name of the current binary (e.g. ktctl)
 #[macro_export] macro_rules! binary

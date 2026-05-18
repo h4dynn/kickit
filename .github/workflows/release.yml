@@ -31,6 +31,13 @@ jobs:
           cd package
           ./xbps-src pkg kickit
 
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.ref_name }}
+        run: |
+          gh release create unstable -F CHANGELOG.md -R "h4dynn/kickit" -t "$(date +"%d %b %Y, %H:%M")" -p
+
       - name: Fetch artifacts
         uses: actions/download-artifact@v6
 

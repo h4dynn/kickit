@@ -1,8 +1,9 @@
-//! Mount implementation layered over the `nix` crate
+//! Mount implementation layered over the `nix`
 
-use crate::display_enum;
-use super::console::Result;
-use std::{fmt, fmt::Display, path::Path};
+use crate::{display_enum, OptionEmptyVec};
+use super::console::{Result, Error, ErrorTrace, ErrorResult};
+
+use std::{fmt, fmt::Display, path::Path, ops::{Deref, DerefMut}};
 
 // Mount flags & their corresponding bit value (MsFlags)
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -28,7 +29,7 @@ pub enum UnmountFlag
   // Don't follow symlinks to their source
   NoFollow = 8
 }
-
+ 
 display_enum!
 {
   Flag
@@ -39,23 +40,66 @@ display_enum!
   }
 }
 
+/*
+ * Create a wrapped value - a struct with a single-object tuple, that can
+ * be dereferenced to the object
+ */
+macro_rules! wrap
+{
+  {
+    $(
+      #[derive($($implement: ident),*)]
+      $vis: vis struct $name: ident ($inner: ty)
+    );+
+  } =>
+  {
+    $(
+      #[derive($($implement, )*)]
+      $vis struct $name($inner);
+
+      impl Deref for $name
+      {
+        type Target = $inner;
+        // The compiler will automatically handle proper dereferencing after this
+        fn deref(&self) -> &$inner
+        {
+          &self.0
+        }
+      }
+      impl DerefMut for $name
+      {
+        fn deref_mut(&mut self) -> &mut $inner
+        {
+          &mut self.0
+        }
+      }
+    )*
+  }
+}
+
 // Basic type alias
 pub type Opt = String;
 
-#[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
-pub struct Flags(pub u64);
+wrap!
+{
+  // Mount flags (casted as u64), added together
+  #[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
+  pub struct Flags(u64);
 
-#[derive(PartialEq, Eq, Clone, Debug, Default)]
-pub struct Opts(pub Vec<Opt>);
+  // Custom filesystem-specific options
+  #[derive(PartialEq, Eq, Clone, Debug, Default)]
+  pub struct Opts(Vec<Opt>);
 
-#[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
-pub struct UnmountFlags(pub i32);
+  // For optional use with `unmount`, which in turn calls `nix::mount::umount2`
+  #[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
+  pub struct UnmountFlags(i32)
+}
 
 impl From<Flags> for nix::mount::MsFlags
 {
   fn from(flags: Flags) -> Self
   {
-    Self::from_bits_retain(flags.0)
+    Self::from_bits_retain(*flags)
   }
 }
 
@@ -63,7 +107,25 @@ impl From<UnmountFlags> for nix::mount::MntFlags
 {
   fn from(flags: UnmountFlags) -> Self
   {
-    Self::from_bits_retain(flags.0)
+    Self::from_bits_retain(*flags)
+  }
+}
+
+impl TryFrom<&str> for Flag
+{
+  type Error = ErrorTrace;
+
+  fn try_from(stringFlag: &str) -> Result<Flag>
+  {
+    use Flag::{ReadOnly, NoSuid, NoDev, NoExec, Remount, Bind, Private};
+
+    Ok(match (stringFlag)
+    {
+      "ro" => ReadOnly, "nosuid" => NoSuid, "nodev" => NoDev,
+      "noexec" => NoExec, "remount" => Remount, "bind" => Bind,
+      "private" => Private,
+      _ => Err(Error::Unknown.trace(&format!("Unrecognised mount flag: {stringFlag}")))?
+    })
   }
 }
 
@@ -97,7 +159,7 @@ macro_rules! mountflags
       let mut flags = Flags::default();
 
       $(
-        flags.0 += $flag as u64;
+        *flags += $flag as u64;
       )*
 
       flags
@@ -118,7 +180,7 @@ macro_rules! mountopts
       let mut opts = Opts::default();
 
       $(
-        opts.0.push($opt.into());
+        (*opts).push($opt.into());
       )*
 
       opts
@@ -139,7 +201,7 @@ macro_rules! unmountflags
       let mut flags = UnmountFlags::default();
 
       $(
-        flags.0 += $flag as i32;
+        *flags += $flag as i32;
       )*
 
       flags
@@ -159,8 +221,6 @@ pub use crate::unmountflags as unmountflags;
 pub fn mount(from: Option<&str>, to: &str, fsType: Option<&str>, flags: Flags, opts: Option<&Opts>)
   -> Result<()>
 {
-  use crate::init::console::{Error, ErrorResult};
-
   /*
    * We have to do a manual map here because if we map like:
    * `.map(|x| &x as &str)`
@@ -172,7 +232,7 @@ pub fn mount(from: Option<&str>, to: &str, fsType: Option<&str>, flags: Flags, o
   {
     if let Some(realOpts) = opts
     {
-      Some(&realOpts.to_string() as &str)
+      Some(&realOpts.join(",") as &str)
     }
     else {
       None
@@ -191,8 +251,6 @@ pub fn mount(from: Option<&str>, to: &str, fsType: Option<&str>, flags: Flags, o
  **/
 pub fn unmount(dest: &str, maybeFlags: Option<UnmountFlags>) -> Result<()>
 {
-  use crate::init::console::{Error, ErrorResult};
-
   if let Some(flags) = maybeFlags
   {
     nix::mount::umount2(dest, flags.into())
@@ -214,7 +272,6 @@ pub fn unmount(dest: &str, maybeFlags: Option<UnmountFlags>) -> Result<()>
 pub fn mounted(mountpoint: impl AsRef<Path> + Display) -> Result<bool>
 {
   use std::fs;
-  use crate::init::console::{Error, ErrorResult};
 
   // Cycle through potential matches from /proc/mounts
   for candMount in (fs::read_to_string("/proc/mounts").into_trace(Error::FileNotFound)?.split('\n'))
@@ -227,4 +284,145 @@ pub fn mounted(mountpoint: impl AsRef<Path> + Display) -> Result<bool>
 
   // Didn't find mount
   Ok(false)
+}
+
+/**
+  * # Errors
+  *
+  * * Failed to open the /etc/fstab file
+  */
+pub fn mountFstabEntries() -> Result<()>
+{
+  use crate::{path, init::console::status};
+  use std::{fs::File, path::PathBuf, io::{BufReader, BufRead}};
+
+  /*
+   * When searching by UUID, partition UUID, ID or label, there is multiple paths where
+   * the kernel may symlink to, so we cover all bases with this macro
+   */
+  macro_rules! lookup
+  {
+    ($how: literal, $with: expr) =>
+    {
+      {
+        // Most of the time it will be here
+        if (path!("/dev", "disk", format!("by-{}", $how), $with).is_symlink())
+        {
+          Ok(format!("/dev/disk/by-{}/{}", $how, $with))
+        }
+        // On some devices (like arm tablets) it will be here instead
+        else if (path!("/dev", "block", format!("by-{}", $how), $with).is_symlink())
+        {
+          Ok(format!("/dev/block/by-{}/{}", $how, $with))
+        }
+        else {
+          Err(Error::Unknown.trace(&format!("Lookup {}={} failed, no suitable target was found!", $how, $with)))
+        }
+      }
+    };
+  }
+
+  // Open the fstab configuration
+  let fstab = File::open(PathBuf::from("/etc/fstab")).into_trace(Error::FileNotFound)?;
+
+  for maybeEntry in (BufReader::new(fstab).lines())
+  {
+    let stringEntry = maybeEntry.into_trace(Error::Unknown)?;
+
+    // Ignore comments...
+    if (stringEntry.starts_with('#'))
+    {
+      continue;
+    }
+
+    // Split up by spaces, so we can parse each entry's information
+    let entry: Vec<&str> = stringEntry.split_ascii_whitespace().collect();
+
+    let (rawSource, dest) = (entry[0], entry[1]);
+    let source =
+    {
+      // Notify to the user what we are mounting
+      status!("Mounting: {rawSource} -> {dest}");
+
+      if (rawSource == "auto")
+      {
+        // Let the mount function infer the source
+        None
+      }
+      else {
+        // Split the source into an array, for sources like `UUID=<UUID>`, to resolve them into paths
+        Some({
+          match (rawSource.rsplit('=').collect::<Vec<&str>>()[..])
+          {
+            // Turn each lookup call into its dev path, mapped by the kernel
+            [partUuid, "PARTUUID"] => &lookup!("partuuid", partUuid)?,
+            [uuid, "UUID"] => &lookup!("uuid", uuid)?,
+            [label, "LABEL"] => &lookup!("label", label)?,
+            [id, "ID"] => &lookup!("id", id)?,
+            // No changes needed here!
+            _ => rawSource
+          }
+        })
+      }
+    };
+    let fsType =
+    {
+      if (matches!(entry[2], "auto" | "none"))
+      {
+        // Let the mount function infer the filesystem's type
+        None
+      }
+      else {
+        Some(entry[2])
+      }
+    };
+    let (flags, opts) =
+    {
+      // Flags - global settings for all filesystems no matter the type
+      let mut flags = Flags::default();
+      // Options - filesystem-type exclusive options
+      let mut opts = Opts::default();
+
+      // Read each flag in its string form (e.g. ReadOnly = "ro"), seperated by commas
+      for option in (entry[3].split(','))
+      {
+        if let Ok(flag) = Flag::try_from(option)
+        {
+          // Add the flag as its u64
+          *flags += flag as u64;
+        }
+        // Ignore the "defaults" flag - it isn't recognised by the libc mount call
+        else if (option != "defaults")
+        {
+          (*opts).push(option.to_owned());
+        }
+      }
+
+      if (source == Some("/"))
+      {
+        // The rootfs will already be mounted so we need the remount flag
+        *flags += Flag::Remount as u64;
+      }
+
+      // `.empty_none()` turns an vector into a Option, where if its empty None is produced
+      (flags, opts.empty_none())
+    };
+
+    mount(source, dest, fsType, flags, opts.as_ref())?;
+  }
+  Ok(())
+}
+
+impl OptionEmptyVec for Opts
+{
+  fn empty_none(self) -> Option<Self>
+  {
+    if ((*self).is_empty())
+    {
+      None
+    }
+    else {
+      Some(self)
+    }
+  }
 }

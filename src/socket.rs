@@ -17,7 +17,6 @@ pub struct Log;
 pub struct Power;
 
 // Limit by the static lifetime because Tokio spawning requires this
-#[doc = include_str!("../docs/Making_a_Socket.md")]
 pub trait Socket: Send + 'static
 {
   /*

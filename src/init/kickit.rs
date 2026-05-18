@@ -191,14 +191,11 @@ fn initServices(services: &Vec<String>) -> Result<Vec<Service>>
 
 macro_rules! socks
 {
-  ($runtime: expr, $($sock: path),*) =>
+  ($($sock: path),*) =>
   {
     {
       $(
-        // Enter the scope of the runtime, allows us to use `tokio::spawn`
-        let _guard = $runtime.handle().enter();
-
-        tokio::spawn(async move
+        task::spawn(async move
         {
           $sock.open_sock().await.handle();
         });
@@ -207,6 +204,7 @@ macro_rules! socks
   };
 }
 
+// Use the dhat allocator for heap analysis, slower than regular allocator
 #[cfg(feature = "dhat_heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -214,13 +212,13 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 #[tokio::main]
 async fn main()
 {
-  use std::{thread::park, env};
-  use tokio::runtime::Runtime as AsyncRuntime;
-  use kickit::{init::{target, cmdlineParam, socket::Open}, socket};
+  use std::{thread::park, env::args};
+  use kickit::{init::{target, cmdlineParam, socket::Open, mount::mountFstabEntries}, socket};
 
-  let rt: AsyncRuntime = AsyncRuntime::new().into_trace(Error::Unknown).handle();
+  #[cfg(feature = "dhat_heap")]
+  let profiler = dhat::Profiler::new_heap();
 
-  let sysArgs: Vec<String> = env::args().collect();
+  let sysArgs: Vec<String> = args().collect();
   // Run alongside another init e.g. openrc or runit
   let noInit = sysArgs.len() > 1 && &sysArgs[1] == "--no-init";
 
@@ -248,6 +246,7 @@ async fn main()
   };
 
   status!("Target: {targetName}");
+
   /*
    * By having our target in a OnceLock we ensure that others parts of the init
    * can access it hassle-free for e.g. logging or services
@@ -272,16 +271,31 @@ async fn main()
     hostname.write_all(target.hostname.as_bytes()).into_trace(Error::Unknown).handle();
   }
 
+  // Now we can mount all the custom entries in /etc/fstab
+  mountFstabEntries().handle();
+
   status!("Setting up work directory");
   setupRunFs(&target.services, target.debugDump).handle();
 
   // Open our sockets
-  socks!(rt, socket::Core, socket::Log, socket::Power);
+  socks!(socket::Core, socket::Log, socket::Power);
 
   // Startup our services & wait for it to finish
   for service in (services)
   {
     service.start().handle();
+  }
+
+  // main() never exits so we never get a dhat analysis without explicitly dropping the profiler
+  #[cfg(feature = "dhat_heap")]
+  {
+    use std::{thread::sleep, time::Duration};
+
+    // Give some time for everything to be setup
+    sleep(Duration::from_mins(3));
+
+    // Drop the profiler so we get the analysis
+    drop(profiler);
   }
 
   // Block indefinitely

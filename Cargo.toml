@@ -28,7 +28,11 @@ debug = false
 strip = "symbols"
 opt-level = 3
 codegen-units = 16
+lto = "fat"
 
+[profile.dev]
+debug = 1
+strip = "none"
 
 [features]
 # Bypass function that checks if pid 1 is kickit
