@@ -30,13 +30,25 @@ jobs:
           cd package
           ./xbps-src pkg kickit
 
-      - name: Create release
+      - name: Create release (pre-release)
+        if: ${{ !startsWith(github.event.head_commit.message, 'release') && github.event_name != 'workflow_dispatch' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
         run: |
           mv -v package/hostdir/binpkgs/main/*.xbps .
-          gh release create unstable -F CHANGELOG.md -R "h4dynn/kickit" -t "$(date +"%d %b %Y, %H:%M")" -p *.xbps
+          gh release create "unstable-$(date +%s)" *.xbps -F CHANGELOG.md -R "h4dynn/kickit" -t "$(date +"%d %b %Y, %H:%M")" -p
+
+      - name: Create release
+        if: ${{ startsWith(github.event.head_commit.message, 'release') || github.event_name == 'workflow_dispatch' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.ref_name }}
+        run: |
+          version="$(grep -w '^version = .*$' Cargo.toml | cut -d'"' -f2)"
+          mv -v package/hostdir/binpkgs/main/*.xbps .
+          { cat ./docs/Installation.md; echo; echo "# Changelog"; echo; cat ./CHANGELOG.md; } > notes.md
+          gh release create "$version" *.xbps -F notes.md -R "h4dynn/kickit" -t "Release $version" --latest
 
       - name: Fetch artifacts
         uses: actions/download-artifact@v6

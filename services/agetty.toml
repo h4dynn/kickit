@@ -1,0 +1,4 @@
+description = "Open TTY consoles"
+shout = true
+pattern = "Standard"
+exec = ["/usr/lib/kickit/agetty.sh"]

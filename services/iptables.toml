@@ -1,0 +1,3 @@
+description = "Linux IPv4 packet filtering ruleset"
+pattern = "Standard"
+exec = ["/usr/bin/iptables", "pause"]

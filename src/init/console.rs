@@ -200,15 +200,15 @@ impl Error
     process::exit(1);
   }
 
-  pub fn trace(self, t: &(impl Display + ?Sized)) -> ErrorTrace
+  pub fn trace(self, trace: impl Display) -> ErrorTrace
   {
-    ErrorTrace { kind: self, context: None, trace: t.to_string() }
+    ErrorTrace { kind: self, context: None, trace: trace.to_string() }
   }
 }
 
 impl ErrorTrace
 {
-  pub fn context(self, context: &(impl Display + ?Sized)) -> Self
+  pub fn context(self, context: impl Display) -> Self
   {
     Self { kind: self.kind, context: Some(context.to_string()), trace: self.trace }
   }

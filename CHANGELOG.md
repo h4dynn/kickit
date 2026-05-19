@@ -1,3 +1,17 @@
+## 14-19 May 2026
+
+* Add support for /etc/fstab entry mounting
+
+* Add XBPS package for Void Linux
+
+* Use lazy unmount as a fallback when powering off
+
+* Unmount filesystems on power-off
+
+* Add safe, socket-based power-off/reboot with `ktctl`
+
+* Respect the `quiet` kernel command-line argument
+
 ## 12-13 May 2026
 
 * Move zstd compression impl from `zstd-rs` to `ruzstd`

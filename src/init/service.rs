@@ -133,7 +133,7 @@ impl Service
 
     // Check the service config exists and is a file
     affirm!(path.is_file(),
-            Error::FileNotFound.trace(&format!("{name}: Service not found")));
+            Error::FileNotFound.trace(format!("{name}: Service not found")));
 
     // Read TOML configuration contents
     let toml = fs::read_to_string(path).into_trace(Error::ServiceParse).context(name)?;
@@ -143,7 +143,7 @@ impl Service
 
     // Check the service's executable actually exists on filesystem
     affirm!(fs::metadata(&config.exec[0]).is_ok(),
-      Error::FileNotFound.trace(&format!("Service executable missing: {name}")));
+      Error::FileNotFound.trace(format!("Service executable missing: {name}")));
 
     // Optional values: fallback to default if not provided (optional & shout are false)
     set!(config, description, optional, shout, pattern);
@@ -207,7 +207,7 @@ impl Service
 
       if (self.log.set(Logger::new(logFile)).is_err())
       {
-        return Err(Error::Unknown.trace(&format!("Failed to set logger for {}", self.name)))
+        return Err(Error::Unknown.trace(format!("Failed to set logger for {}", self.name)))
       }
     }
 

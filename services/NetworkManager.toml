@@ -1,0 +1,4 @@
+description = "Network Management daemon"
+shout = true
+pattern = "Standard"
+exec = ["/usr/bin/NetworkManager", "-n"]

@@ -1,0 +1,4 @@
+description = "Secure Shell Daemon"
+optional = true
+pattern = "Standard"
+exec = ["/usr/bin/sshd", "-D"]

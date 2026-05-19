@@ -1,0 +1,5 @@
+description = "Message bus system"
+shout = true
+pattern = "Standard"
+run_folder = { name = "dbus", owner = 22, group = 22, mode = 0o755 }
+exec = ["/usr/bin/dbus-daemon", "--system", "--nofork", "--nopidfile"]

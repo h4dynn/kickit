@@ -1,8 +1,9 @@
 pkgname=kickit
-version=0.1.0
+version=0.1.1
 revision=1
-makedepends="cargo git"
+hostmakedepends="cargo git"
 short_desc="A robust & simple init system"
+build_style=cargo
 maintainer="h4dynn <h4dynn@github.com>"
 license="GPL-3.0-or-later"
 homepage="https://github.com/h4dynn/kickit"
@@ -26,5 +27,17 @@ do_install()
   install -vm0755 ./target/release/kickit "$DESTDIR/usr/lib/kickit/kickit"
   install -vm0755 ./target/release/ktctl "$DESTDIR/usr/bin/ktctl"
   install -vm0755 ./src/service-helpers/agetty.sh "$DESTDIR/usr/lib/kickit/agetty.sh"
-  #install -vm0755 ./src/service-helpers/udev.sh "$DESTDIR/usr/lib/kickit/udev.sh"
+  install -vm0755 ./src/service-helpers/udev.sh "$DESTDIR/usr/lib/kickit/udev.sh"
+
+  while read service
+  do {
+    install -vm0644 "$service" "$DESTDIR/usr/lib/kickit/service/${service##*/}"
+  }
+  done \
+    < <(find ./services -maxdepth 1 -type f -name '*.toml')
+
+  cd "$DESTDIR/usr/bin"
+  ln -s ktctl poweroff
+  ln -s ktctl reboot
+  ln -s ../lib/kickit/kickit init
 }

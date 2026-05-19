@@ -40,17 +40,16 @@ pub fn source(name: String) -> Result<Target>
                     .into_trace(Error::FileNotFound)?;
 
   // Source the configuration
-  let sourcedTarget: TargetSource = toml::from_str(&targetToml).into_trace(Error::TargetParse)?;
+  let target: TargetSource = toml::from_str(&targetToml).into_trace(Error::TargetParse)?;
 
-  let services = sourcedTarget.services
-                    .ok_or(Error::TargetMissingValue.trace(&format!("services[] missing in {name}.toml")))?;
+  let services = target.services.ok_or(Error::TargetMissingValue.trace(format!("services missing from {name}")))?;
 
   // Set our target values or the default if not specified in sourced config
-  let logLevel = sourcedTarget.log_level.unwrap_or(1);
-  let hostname = sourcedTarget.hostname.unwrap_or(String::from("localhost"));
-  let debugDump = sourcedTarget.debug_dump.unwrap_or(false);
+  let logLevel = target.log_level.unwrap_or(1);
+  let hostname = target.hostname.unwrap_or(String::from("localhost"));
+  let debugDump = target.debug_dump.unwrap_or(false);
 
-  if (sourcedTarget.debug_dump == Some(true) && !cfg!(debug_assertions))
+  if (target.debug_dump == Some(true) && !cfg!(debug_assertions))
   {
     use crate::{init::console::warn, console::Colour};
     // This will have no effect on release builds

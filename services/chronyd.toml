@@ -1,0 +1,5 @@
+description = "Versatile implementation of the Network Time Protocol"
+shout = true
+pattern = "Standard"
+run_folder = { name = "chrony", owner = 989, group = 988, mode = 0o750 }
+exec = ["/usr/bin/chronyd", "-n", "-u", "chrony"]

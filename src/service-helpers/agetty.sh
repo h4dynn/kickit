@@ -43,9 +43,14 @@ do {
   tty=$((tty+1))
   echo "Opening tty ${tty}/${TTYS}" >&2
   # Open agetty in the background
-  exec "${GETTY}" "${GETTY_ARGS}" "${tty}" "${BAUD_RATE}" "${TERM_NAME}" &
+  "${GETTY}" "${GETTY_ARGS}" "${tty}" "${BAUD_RATE}" "${TERM_NAME}" &
 }
 done
 
-# As long as our agettys are running, this script will never exit
-wait
+# Block indefinitely
+while :
+do {
+  # This is the max cap for sleep
+  sleep 2073600
+}
+done

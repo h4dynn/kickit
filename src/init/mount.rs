@@ -80,8 +80,7 @@ macro_rules! wrap
 // Basic type alias
 pub type Opt = String;
 
-wrap!
-{
+wrap! {
   // Mount flags (casted as u64), added together
   #[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
   pub struct Flags(u64);
@@ -115,16 +114,18 @@ impl TryFrom<&str> for Flag
 {
   type Error = ErrorTrace;
 
-  fn try_from(stringFlag: &str) -> Result<Flag>
+  fn try_from(flag: &str) -> Result<Flag>
   {
     use Flag::{ReadOnly, NoSuid, NoDev, NoExec, Remount, Bind, Private};
 
-    Ok(match (stringFlag)
-    {
-      "ro" => ReadOnly, "nosuid" => NoSuid, "nodev" => NoDev,
-      "noexec" => NoExec, "remount" => Remount, "bind" => Bind,
-      "private" => Private,
-      _ => Err(Error::Unknown.trace(&format!("Unrecognised mount flag: {stringFlag}")))?
+    Ok({
+      match (flag)
+      {
+        "ro" => ReadOnly, "nosuid" => NoSuid, "nodev" => NoDev,
+        "noexec" => NoExec, "remount" => Remount, "bind" => Bind,
+        "private" => Private,
+        _ => Err(Error::Unknown.trace(format!("Unrecognised mount flag: {flag}")))?
+      }
     })
   }
 }
@@ -133,24 +134,26 @@ impl Display for Opts
 {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
   {
-    let mut str_opts = String::new();
+    let mut stringOpts = String::new();
 
     for option in (&self.0)
     {
-      str_opts.push_str(option);
-      str_opts.push(',');
+      stringOpts.push_str(option);
+      // Options are seperated by commas
+      stringOpts.push(',');
     }
 
-    if (!str_opts.is_empty())
+    if (!stringOpts.is_empty())
     {
-      write!(f, "{}", str_opts.strip_suffix(',').expect("Options formatting error"))?;
+      // Remove the end trailing comma if it's there
+      write!(f, "{}", stringOpts.strip_suffix(',').expect("Options formatting error"))?;
     }
     Ok(())
   }
 }
 
 #[macro_export]
-macro_rules! mountflags
+macro_rules! mountFlags
 {
   [$($flag: tt),*] =>
   {
@@ -168,10 +171,10 @@ macro_rules! mountflags
 
   [] => { Flags::default() };
 }
-pub use crate::mountflags as mountflags;
+pub use mountFlags as flags;
 
 #[macro_export]
-macro_rules! mountopts
+macro_rules! mountOpts
 {
   [$($opt: tt),*] =>
   {
@@ -189,10 +192,10 @@ macro_rules! mountopts
 
   [] => { Options::default() };
 }
-pub use crate::mountopts as mountopts;
+pub use mountOpts as opts;
 
 #[macro_export]
-macro_rules! unmountflags
+macro_rules! unmountFlags
 {
   [$($flag: tt),*] =>
   {
@@ -210,7 +213,7 @@ macro_rules! unmountflags
 
   [] => { UnmountFlags::default() };
 }
-pub use crate::unmountflags as unmountflags;
+pub use unmountFlags as unmountFlags;
 
 /**
   * # Errors
@@ -302,7 +305,7 @@ pub fn mountFstabEntries() -> Result<()>
    */
   macro_rules! lookup
   {
-    ($how: literal, $with: expr) =>
+    ($how: literal = $with: expr) =>
     {
       {
         // Most of the time it will be here
@@ -355,10 +358,10 @@ pub fn mountFstabEntries() -> Result<()>
           match (rawSource.rsplit('=').collect::<Vec<&str>>()[..])
           {
             // Turn each lookup call into its dev path, mapped by the kernel
-            [partUuid, "PARTUUID"] => &lookup!("partuuid", partUuid)?,
-            [uuid, "UUID"] => &lookup!("uuid", uuid)?,
-            [label, "LABEL"] => &lookup!("label", label)?,
-            [id, "ID"] => &lookup!("id", id)?,
+            [partUuid, "PARTUUID"] => &lookup!("partuuid" = partUuid)?,
+            [uuid, "UUID"] => &lookup!("uuid" = uuid)?,
+            [label, "LABEL"] => &lookup!("label" = label)?,
+            [id, "ID"] => &lookup!("id" = id)?,
             // No changes needed here!
             _ => rawSource
           }

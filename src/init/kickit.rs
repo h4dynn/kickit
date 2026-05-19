@@ -147,9 +147,8 @@ fn setupRunFs(services: &Vec<String>, debugDump: bool) -> Result<()>
 #[inline]
 fn mountSysFilesystems() -> Result<()>
 {
-  use kickit::init::mount::{
-          Flag::{NoSuid, NoDev, NoExec, Remount, Private},
-          mount, unmount, mounted, mountflags as flags};
+  use kickit::init::mount::{Flag::{NoSuid, NoDev, NoExec, Remount, Private},
+                              mount, unmount, mounted, flags};
 
   macro_rules! mount
   {
@@ -167,7 +166,7 @@ fn mountSysFilesystems() -> Result<()>
   mount!("sysfs", "/sys", "sysfs", flags![NoSuid, NoDev, NoExec]);
   mount!("dev", "/dev", "devtmpfs", flags![NoSuid]);
   mount!("tmpfs", "/run", "tmpfs", flags![NoSuid]);
-  mount!("tmpfs", "/tmp", "tmpfs", flags![NoSuid, NoDev/*, NoExec*/]);
+  mount!("tmpfs", "/tmp", "tmpfs", flags![NoSuid, NoDev]);
   // Remount the rootfs as read-write if booted with `ro` cmdline argument
   mount(None, "/", None, flags![Private, Remount], None)?;
 

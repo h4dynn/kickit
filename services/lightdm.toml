@@ -1,0 +1,4 @@
+description = "Light Display Manager"
+shout = true
+pattern = "Standard"
+exec = ["/usr/bin/lightdm"]

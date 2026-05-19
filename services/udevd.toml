@@ -1,0 +1,4 @@
+description = "udev device manager"
+shout = true
+pattern = "Standard"
+exec = ["/usr/lib/kickit/udev.sh"]

@@ -51,7 +51,7 @@ pub fn forcePoweroff(mode: Mode) -> Result<()>
 pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
 {
   use crate::{path, console::{Colour, HandleError, ReturnError}, oncelock};
-  use super::{POWER_OFF, mount::{unmount, unmountflags, UnmountFlag::Lazy}, console::{status, warn}};
+  use super::{POWER_OFF, mount::{unmount, unmountFlags, UnmountFlag::Lazy}, console::{status, warn}};
   use nix::{unistd::Pid, sys::{reboot::reboot, signal::{kill, Signal}}};
   use std::{fs, path::PathBuf};
 
@@ -74,7 +74,7 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
       // Read the little-endian ordered PID u32 bytes
       let pid = u32::from_le_bytes(fs::read(pidPath).into_trace(Error::RunFsFail)?
                   .try_into()
-                  .map_err(|_| Error::Format.trace("Bad pid contents!").context(&name.display()))?);
+                  .map_err(|_| Error::Format.trace("Bad pid contents!").context(name.display()))?);
 
       inner.push((pid, name));
     }
@@ -119,7 +119,7 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
           error.warn();
           warn!("Failed to unmount filesystem, it will be lazily unmounted: {mountpoint}");
           // We don't want to do this but this is a last resort
-          unmount(mountpoint, Some(unmountflags!(Lazy))).or_warn();
+          unmount(mountpoint, Some(unmountFlags!(Lazy))).or_warn();
         }
       }
     }
