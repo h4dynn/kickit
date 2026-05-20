@@ -29,7 +29,7 @@ pub enum UnmountFlag
   // Don't follow symlinks to their source
   NoFollow = 8
 }
- 
+
 display_enum!
 {
   Flag
@@ -77,7 +77,6 @@ macro_rules! wrap
   }
 }
 
-// Basic type alias
 pub type Opt = String;
 
 wrap! {
@@ -174,27 +173,6 @@ macro_rules! mountFlags
 pub use mountFlags as flags;
 
 #[macro_export]
-macro_rules! mountOpts
-{
-  [$($opt: tt),*] =>
-  {
-    {
-      use $crate::init::mount::Opts;
-      let mut opts = Opts::default();
-
-      $(
-        (*opts).push($opt.into());
-      )*
-
-      opts
-    }
-  };
-
-  [] => { Options::default() };
-}
-pub use mountOpts as opts;
-
-#[macro_export]
 macro_rules! unmountFlags
 {
   [$($flag: tt),*] =>
@@ -214,6 +192,27 @@ macro_rules! unmountFlags
   [] => { UnmountFlags::default() };
 }
 pub use unmountFlags as unmountFlags;
+
+#[macro_export]
+macro_rules! mountOpts
+{
+  [$($opt: tt),*] =>
+  {
+    {
+      use $crate::init::mount::Opts;
+      let mut opts = Opts::default();
+
+      $(
+        (*opts).push($opt.into());
+      )*
+
+      opts
+    }
+  };
+
+  [] => { Options::default() };
+}
+pub use mountOpts as opts;
 
 /**
   * # Errors
@@ -319,7 +318,7 @@ pub fn mountFstabEntries() -> Result<()>
           Ok(format!("/dev/block/by-{}/{}", $how, $with))
         }
         else {
-          Err(Error::Unknown.trace(&format!("Lookup {}={} failed, no suitable target was found!", $how, $with)))
+          Err(Error::Unknown.trace(&format!("Lookup {}={} failed, no target was found!", $how, $with)))
         }
       }
     };
@@ -414,18 +413,4 @@ pub fn mountFstabEntries() -> Result<()>
     mount(source, dest, fsType, flags, opts.as_ref())?;
   }
   Ok(())
-}
-
-impl OptionEmptyVec for Opts
-{
-  fn empty_none(self) -> Option<Self>
-  {
-    if ((*self).is_empty())
-    {
-      None
-    }
-    else {
-      Some(self)
-    }
-  }
 }

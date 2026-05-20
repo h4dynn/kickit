@@ -29,11 +29,24 @@ impl From<u8> for InitState
     const EMERGENCY: u8 = Emergency as u8;
     const STALLED: u8 = Stalled as u8;
 
-    match (byte) { OK => Ok, EMERGENCY => Emergency, STALLED => Stalled, _ => Down }
+    match (byte)
+    {
+      OK => Ok,
+      EMERGENCY => Emergency,
+      STALLED => Stalled,
+      _ => Down
+    }
   }
 }
 
-impl InitState { #[must_use] pub fn is_ok(self) -> bool { self == Self::Ok } }
+impl InitState
+{
+  #[must_use]
+  pub fn is_ok(self) -> bool
+  {
+    self == Self::Ok
+  }
+}
 
 // Open and close a lock on the Mutex to find the state without using another thread
 #[macro_export] macro_rules! state

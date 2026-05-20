@@ -14,7 +14,7 @@ pub mod console;
 pub mod state;
 pub mod socket;
 
-use std::{fmt::Display, num::ParseIntError};
+use std::{fmt::Display, num::ParseIntError, ops::Deref};
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug, Default)]
 pub enum Release
@@ -105,11 +105,11 @@ pub const PRETTY_VERSION: fn() -> String = ||
   // And join both of those together without a seperator
   .join("");
 
-impl<T> OptionEmptyVec for Vec<T>
+impl<T, S: Deref<Target = Vec<T>>> OptionEmptyVec for S
 {
   fn empty_none(self) -> Option<Self>
   {
-    if (self.is_empty())
+    if ((*self).is_empty())
     {
       None
     }
@@ -120,12 +120,16 @@ impl<T> OptionEmptyVec for Vec<T>
 }
 
 // Get the name of the current binary (e.g. ktctl)
-#[macro_export] macro_rules! binary
+#[macro_export]
+macro_rules! binary
 {
   () =>
   {
     {
-      std::env::current_exe()
+      use std::env::current_exe;
+
+      // Get the file that has been executed
+      current_exe()
         .unwrap_or(env!("CARGO_PKG_NAME").into())
         .file_name()
         .unwrap_or(std::ffi::OsStr::new(env!("CARGO_PKG_NAME")))
@@ -135,7 +139,8 @@ impl<T> OptionEmptyVec for Vec<T>
   };
 }
 // Implement std::fmt::Display for enumeration in a nicely formatted way
-#[macro_export] macro_rules! display_enum
+#[macro_export]
+macro_rules! display_enum
 {
   /*
    * Implement some displayable text for each variant of an enum, for example:
@@ -250,7 +255,8 @@ impl<T> OptionEmptyVec for Vec<T>
  *   }
  * ```
  */
-#[macro_export] macro_rules! path
+#[macro_export]
+macro_rules! path
 {
   ($($sub: expr),*) =>
   {
@@ -275,7 +281,8 @@ impl<T> OptionEmptyVec for Vec<T>
  *   }
  * ```
  */
-#[macro_export] macro_rules! file_path
+#[macro_export]
+macro_rules! file_path
 {
   ($parent: expr, $file: expr, $ext: expr) =>
   {
@@ -301,7 +308,8 @@ impl<T> OptionEmptyVec for Vec<T>
  *   }
  * ```
  */
-#[macro_export] macro_rules! oncelock
+#[macro_export]
+macro_rules! oncelock
 {
   { let $oncelock: path = $val: expr } =>
   {
@@ -319,6 +327,26 @@ impl<T> OptionEmptyVec for Vec<T>
     }
     else {
       Ok(())
+    }
+  };
+  (&mut $oncelock: expr) =>
+  {
+    if let Some(inner) = $oncelock.get_mut()
+    {
+      Ok(inner)
+    }
+    else {
+      Err(Error::Unknown.trace("OnceLock value has not been set yet!"))
+    }
+  };
+  (&$oncelock: expr) =>
+  {
+    if let Some(inner) = $oncelock.get()
+    {
+      Ok(inner)
+    }
+    else {
+      Err(Error::Unknown.trace("OnceLock value has not been set yet!"))
     }
   };
 }

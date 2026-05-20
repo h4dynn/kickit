@@ -1,11 +1,9 @@
 //! Service implementation
 
-use std::{fs, io, process::{Command, Child}, sync::OnceLock, path::PathBuf};
+use std::{fs, io, process::{Command, Child}, sync::OnceLock};
 use serde::Deserialize;
 use crate::{init::console::{Error, ErrorResult, Result},
-      console::{affirm, ExtendWithContext}, file_path, path};
-
-pub static UP_SERVICES: OnceLock<Vec<&str>> = OnceLock::new();
+      console::{affirm, ExtendWithContext}, file_path, path, oncelock};
 
 // The service body which is generated from the init() method
 #[derive(Debug)]
@@ -23,13 +21,15 @@ pub struct Service
 
   // Automatically set options by service manager
   state: State,
-  process: Option<Child>,
-  log: OnceLock<Logger>
+  pub process: Option<Child>,
+  pub log: OnceLock<Logger>
 }
 
 #[derive(Debug)]
 pub struct Logger
 {
+  name: String,
+  shout: bool,
   // The current line count
   line: usize,
   // Matching log file
@@ -83,28 +83,6 @@ struct Config
   logger: Option<bool>,
   run_folder: Option<RunDirectory>,
   exec: Vec<String>
-}
-
-// Used to locate which path we want to find (e.g. exited = /run/kickit/service/S/exited)
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum Path
-{
-  Exited,
-  Pid
-}
-
-trait FindPath
-{
-  fn path(&self, which: Path) -> Result<PathBuf>;
-}
-
-impl Logger
-{
-  #[must_use]
-  pub const fn new(file: fs::File) -> Self
-  {
-    Self { line: 0, file, reader: None }
-  }
 }
 
 impl Service
@@ -165,11 +143,13 @@ impl Service
     * * Couldn't spawn or start a process for the service
     */
   #[inline]
-  pub fn up(&mut self) -> Result<()>
+  pub async fn up(&mut self) -> Result<()>
   {
     use nix::unistd::{chown, Uid, Gid};
-    use std::{fs::{File, Permissions}, os::unix::fs::PermissionsExt,
-              io::{Write, BufRead, BufReader, pipe}};
+    use super::TARGET;
+    use tokio::time::timeout;
+    use std::{fs::{File, Permissions}, io::{Write, BufRead, BufReader, pipe},
+                  os::unix::fs::PermissionsExt, time::Duration};
 
     // An empty zstd file, created from /dev/null (`$ zstd -1c < /dev/null | xxd`)
     const EMPTY_ZSTD: [u8; 13] = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01, 0x00,
@@ -198,6 +178,7 @@ impl Service
 
       // Make log file inaccessible to anybody but the root user
       logFile.set_permissions(Permissions::from_mode(0o600)).into_trace(Error::RunFsFail)?;
+
       /*
        * The log file is going to be decompressed later on to view its contents,
        * the decompressor will fail if the file is empty so this provides some
@@ -205,7 +186,7 @@ impl Service
        */
       logFile.write_all(&EMPTY_ZSTD).into_trace(Error::RunFsFail)?;
 
-      if (self.log.set(Logger::new(logFile)).is_err())
+      if (self.log.set(Logger::new(self.name.clone(), self.shout, logFile)).is_err())
       {
         return Err(Error::Unknown.trace(format!("Failed to set logger for {}", self.name)))
       }
@@ -261,30 +242,43 @@ impl Service
       RunOnce =>
       {
         // Start the service's process & wait for it to finish
-        let process = Command::new(&self.exec[0]).args(args)
-                        .stderr(writer.try_clone().into_trace(Error::Unknown)?)
-                        .stdout(writer)
-                        .output()
-                        .into_trace(Error::ServiceUp).context(&self.name)?;
+        let mut process = Command::new(&self.exec[0]).args(args)
+                            .stderr(writer.try_clone().into_trace(Error::Unknown)?)
+                            .stdout(writer)
+                            .spawn()
+                            .into_trace(Error::ServiceUp).context(&self.name)?;
 
-        for maybeLine in (BufReader::new(reader).split(b'\n'))
+        // How long are we willing to wait for this service? (default: 5 seconds)
+        let maxWaitTime = Duration::from_secs(oncelock!(&TARGET)?.serviceTimeout);
+
+        match (timeout(maxWaitTime, async { process.wait() }).await)
+        {
+          // Timeout was not reached, and service exited normally!
+          Ok(Ok(status)) =>
+          {
+            if (status.success())
+            {
+              self.log("Service has finished", true)?;
+            }
+            else {
+              return Err(Error::ServiceUp.trace(format!("{} exited on error ({})", &self.name, status)))
+            }
+          },
+          // Service's process failed
+          Ok(Err(error)) => error.into_trace(Error::ServiceUp)?,
+          // Timeout was reached...
+          Err(..) => return Err(Error::ServiceUp.trace(format!("Timeout while waiting for {}", &self.name)))
+        }
+
+        // A buffered read is the most efficient way to read line-by-line
+        for maybeLine in (BufReader::new(reader).lines())
         {
           let line = maybeLine.into_trace(Error::Format).context(format!("Invalid input for {}", self.name))?;
-          let stringLine = String::from_utf8(line).into_trace(Error::Format).context(&self.name)?;
-
-          self.log(&stringLine, false)?;
+          self.log(&line, false)?;
         }
 
-        // Service's process exit on 0 (success)
-        if (process.status.success())
-        {
-          self.log("Service has finished", true)?;
-        }
-        else {
-          return Err(Error::ServiceUp.trace(&self.name))
-        }
-
-        File::create_new(FindPath::path(self, Path::Exited)?).into_trace(Error::RunFsFail)?;
+        // Signal to ktctl that we have finished
+        File::create_new(path!("/run/kickit/service", &self.name, "exited")).into_trace(Error::RunFsFail)?;
 
         if let Some(log) = self.log.get_mut()
         {
@@ -303,50 +297,110 @@ impl Service
 
   /**
     * # Errors
-    * * Service isn't running already
-    * * Service has a `RunOnce pattern` (no process to kill)
-    * * Couldn't kill the service's process
     *
-    * # Panics
-    * * Service doesn't have a matching process (should have since its up)
+    * * Service process exited on a code (even if the code is 0),
+    * * Failed to wait for the process
     */
-  #[inline]
-  pub(crate) fn down(&mut self) -> Result<()>
+  pub fn supervise(name: &str, mut process: Child) -> Result<()>
   {
-    use crate::init::{console::status, service::Pattern::RunOnce};
+    use super::POWER_OFF;
 
-    affirm!(self.state == Up, Error::ServiceDown.trace("Already down").context(&self.name));
-    // RunOnce services are already dead so we can't kill them
-    affirm!(self.pattern != RunOnce, Error::ServiceDown.trace("Invalid pattern").context(&self.name));
+    /*
+     * Make sure if we receive an error, but the init system has been told to
+     * power-off, that we don't actually return the error, as a service being
+     * killed during power-off is normal behavoir
+     */
+    macro_rules! err
+    {
+      ($error: expr) =>
+      {
+        if let Some(powerOff) = POWER_OFF.get() && (*powerOff)
+        {
+          // Don't want to trigger an error if we are powering off - this is expected behavoir
+          Ok(())
+        }
+        else {
+          Err($error)
+        }
+      }
+    }
 
-    status!("Killing service: {}", &self.name);
-    // Kill the process's main process & by extension all its subprocesses
-    self.process.as_mut().unwrap().kill().into_trace(Error::ServiceDown).context(&self.name)?;
-
-    self.log(&format!("Fossilised service: {}", self.name), true)?;
-    // Process was successfully killed
-    self.state = Down;
-
-    Ok(())
+    match (process.wait())
+    {
+      // Service has exited normally on a code
+      Ok(status) =>
+      {
+        err!(Error::ServiceDown.trace(
+        {
+          if let Some(code) = status.code()
+          {
+            format!("Service {name} has died: {code}")
+          }
+          else {
+            format!("Service {name} has died: code is unavailable!")
+          }
+        }))
+      },
+      // Even the watcher has failed for some reason
+      Err(error) => err!(Error::ServiceDown.trace(error).context(name))
+    }
   }
 
   /**
     * # Errors
-    * * Failed to read bytes from the service log
-    * * Service was killed or turned into a zombie
+    *
+    * * Service does not have a logger available (this will only happen if the service
+    *   hasn't been started)
     */
+  pub fn log(&mut self, new: &str, fromInit: bool) -> Result<()>
+  {
+    oncelock!(&mut self.log)?.log(new, fromInit)
+  }
+
+  /**
+    * # Errors
+    * * Service isn't running
+    * * Service has a `RunOnce` pattern
+    * * Service's process couldn't be found
+    */
+  pub fn pid(&self) -> Result<u32>
+  {
+    use crate::init::service::Pattern::RunOnce;
+
+    affirm!(self.state == Up, Error::ServiceAccess.trace("Down"));
+    // These aren't saved because they'll be dead
+    affirm!(self.pattern != RunOnce, Error::ServiceAccess.trace("Cannot get PID for RunOnce service"));
+
+    match (&self.process)
+    {
+      Some(i) => Ok(i.id()),
+      None => Err(Error::ServiceAccess.into())
+    }
+  }
+}
+
+impl Logger
+{
+  #[must_use]
+  pub const fn new(name: String, shout: bool, file: fs::File) -> Self
+  {
+    Self { name, shout, line: 0, file, reader: None }
+  }
+
   /*
-   * Watch the service in the background and do 3 things:
-   *
-   * 1) Make sure it isn't killed or zombified,
-   * 2) Read its logs and report them,
-   * 3) Wait for a power signal & stop the service if one is given
+   * Watch the reader for the process for updates & then send them to the
+   * service's log
    */
+  /**
+    * # Errors
+    *
+    * * Logger doesn't have a reader (this will only happen for services with a `RunOnce` pattern),
+    * * Failed to read bytes from the reader,
+    * * Failed to add new line to the log (in `self.log(_, _)`)
+    */
   pub fn watch(&mut self) -> Result<()>
   {
-    use std::{io::{Read, BufReader}, thread::sleep, time::Duration};
-    use crate::{state::state, console::ReturnError};
-    use super::POWER_OFF;
+    use std::{thread::sleep, time::Duration, io::{Read, BufReader}};
 
     loop {
       /*
@@ -355,77 +409,42 @@ impl Service
        */
       sleep(Duration::from_millis(250));
 
-      if (self.logger) && let Some(logger) = self.log.get()
-      {
-        let mut tester = [0; 1];
-        let mut log = String::new();
+      let mut tester = [0; 1];
+      let mut log = String::new();
 
-        let mut logReader = logger.reader.as_ref().ok_or(Error::Unknown.trace("Logger missing!"))?;
+      let mut logReader = self.reader.as_ref().ok_or(Error::Unknown.trace("Logger missing!"))?;
+
+      /*
+       * Read stderr and take one byte; if this fails then we know there
+       * is nothing to read but if it succeeds then we can read the rest
+       */
+      if (logReader.read_exact(&mut tester).is_ok())
+      {
+        // Push the single byte we read
+        log.push(tester[0] as char);
 
         /*
-         * Read stderr and take one byte; if this fails then we know there
-         * is nothing to read but if it succeeds then we can read the rest
+         * We use a BufReader here since its more efficient to do so
+         * (thanks clippy!)
          */
-        if (logReader.read_exact(&mut tester).is_ok())
+        for maybeByte in (BufReader::new(logReader).bytes())
         {
-          // Push the single byte we read
-          log.push(tester[0] as char);
+          // Panic if byte is Err (should never be)
+          let byte = maybeByte.into_trace(Error::ServiceLog).context(&self.name)?;
 
-          /*
-           * We use a BufReader here since its more efficient to do so
-           * (thanks clippy!)
-           */
-          for maybeByte in (BufReader::new(logReader).bytes())
+          // This is our EOF- we know to stop reading bytes here
+          if (byte == b'\n')
           {
-            // Panic if byte is Err (should never be)
-            let byte = maybeByte.into_trace(Error::ServiceLog).context(&self.name)?;
-
-            // This is our EOF- we know to stop reading bytes here
-            if (byte == b'\n')
-            {
-              break
-            }
-
-            log.push(byte as char);
+            break
           }
 
-          // Sometimes our log has multiple lines so account for this here
-          for logLine in (log.split('\n'))
-          {
-            self.log(logLine, false)?;
-          }
+          log.push(byte as char);
         }
-      }
 
-      if (state!().is_ok())
-      {
-        // Make sure our service is running okay (Z = zombie / X = killed)
-        if let Ok(spec) = fs::read_to_string(FindPath::path(self, Path::Pid)?) &&
-            (!matches!(spec.split(' ').nth(2), Some("Z" | "X")))
+        // Sometimes our log has multiple lines so account for this here
+        for logLine in (log.split('\n'))
         {
-          // Don't need to do anything
-          continue;
-        }
-        // Power off signal sent by `poweroff(_, _)` function
-        if let Some(powerOff) = POWER_OFF.get() && (*powerOff)
-        {
-          // Don't want to trigger an error if we are powering off - this is expected behavoir
-          return Ok(())
-        }
-
-        // Try to stop it or return error if that fails
-        self.down()?;
-
-        let error = Error::ServiceNotRunning.trace("Service died!").context(&self.name);
-
-        if (self.optional)
-        {
-          // We don't want an optional service throwing a global error
-          error.warn();
-        }
-        else {
-          // uh-oh very bad
-          return Err(error)
+          self.log(logLine, false)?;
         }
       }
     }
@@ -450,12 +469,10 @@ impl Service
     use ruzstd::{decoding::StreamingDecoder, encoding::{compress, CompressionLevel}};
 
     // Don't send empty lines if they are found for whatever reason
-    if (new.is_empty() || !self.logger)
+    if (new.is_empty())
     {
       return Ok(())
     }
-
-    let log = self.log.get_mut().ok_or(Error::Unknown.trace("Log uninitialised!"))?;
 
     /*
      * We cannot have more than 1 line of content, this function is designed
@@ -469,10 +486,10 @@ impl Service
      * Because this function will be called multiple times, changing the seek
      * on the log file, we do this to ensure we are reading from the beginning
      */
-    log.file.rewind().into_trace(Error::Unknown)?;
+    self.file.rewind().into_trace(Error::Unknown)?;
 
     // This is the zstd decoder which wraps over the file & implements Read
-    let mut decoder = StreamingDecoder::new(&log.file).into_trace(Error::Unknown)?;
+    let mut decoder = StreamingDecoder::new(&self.file).into_trace(Error::Unknown)?;
     let mut contents = Vec::new();
     // Read the decompressed log contents
     decoder.read_to_end(&mut contents).into_trace(Error::AccessLog)?;
@@ -515,46 +532,11 @@ impl Service
      * Reading from the logfile changes the cursor position so we set it back to
      * the beginning to overwrite the file instead of appending it
      */
-    log.file.rewind().into_trace(Error::Unknown)?;
+    self.file.rewind().into_trace(Error::Unknown)?;
     // Overwrite log file with new contents
-    compress(Cursor::new(contents), &mut log.file, CompressionLevel::Fastest);
-    log.line += 1;
+    compress(Cursor::new(contents), &mut self.file, CompressionLevel::Fastest);
+    self.line += 1;
 
     Ok(())
-  }
-
-  /**
-    * # Errors
-    * * Service isn't running
-    * * Service has a `RunOnce` pattern
-    * * Service's process couldn't be found
-    */
-  pub fn pid(&self) -> Result<u32>
-  {
-    use crate::init::service::Pattern::RunOnce;
-
-    affirm!(self.state == Up, Error::ServiceAccess.trace("Down"));
-    // These aren't saved because they'll be dead
-    affirm!(self.pattern != RunOnce, Error::ServiceAccess.trace("Cannot get PID for RunOnce service"));
-
-    match (&self.process)
-    {
-      Some(i) => Ok(i.id()),
-      None => Err(Error::ServiceAccess.into())
-    }
-  }
-}
-
-impl FindPath for Service
-{
-  fn path(&self, which: Path) -> Result<PathBuf>
-  {
-    use Path::{Exited, Pid};
-
-    Ok(PathBuf::from(match (which)
-    {
-      Exited => format!("/run/kickit/service/{}/exited", self.name),
-      Pid => format!("/proc/{}/stat", self.pid()?)
-    }))
   }
 }

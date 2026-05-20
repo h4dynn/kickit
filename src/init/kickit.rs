@@ -13,13 +13,13 @@ use kickit::{
 
 trait StartService
 {
-  fn start(self) -> Result<()>;
+  async fn start(self) -> Result<()>;
 }
 
 impl StartService for Service
 {
   #[inline]
-  fn start(mut self) -> Result<()>
+  async fn start(mut self) -> Result<()>
   {
     use kickit::{init::service::Pattern::{Standard, Forking}, state};
 
@@ -31,7 +31,7 @@ impl StartService for Service
       stall!();
     }
 
-    if let Err(trace) = self.up()
+    if let Err(trace) = self.up().await
     {
       // If this service is optional we only need to warn not abort
       if (self.optional)
@@ -45,7 +45,21 @@ impl StartService for Service
 
     if (matches!(self.pattern, Standard | Forking))
     {
-      task::spawn(async move { self.watch().handle() });
+      /*
+       * Move the log out of the Service & take ownership of it. This is because
+       * if we used a referenced log, tokio would error out because it would
+       * need to be statically borrowed which cannot be done in this instance
+       */
+      let mut log = self.log.into_inner()
+                        .ok_or(Error::Unknown.trace(format!("{}: Logger missing!", &self.name)))?;
+
+      // Same for the process
+      let process = self.process.ok_or(Error::Unknown.trace(format!("{}: Process missing!", &self.name)))?;
+
+      // Watch the log for updates
+      task::spawn(async move { log.watch().handle() });
+      // Supervise the service's daemon to make sure it doesn't die
+      task::spawn(async move { Service::supervise(&self.name, process).handle() });
     }
     Ok(())
   }
@@ -282,7 +296,7 @@ async fn main()
   // Startup our services & wait for it to finish
   for service in (services)
   {
-    service.start().handle();
+    service.start().await.handle();
   }
 
   // main() never exits so we never get a dhat analysis without explicitly dropping the profiler

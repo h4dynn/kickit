@@ -9,7 +9,8 @@ struct TargetSource
   pub services: Option<Vec<String>>,
   pub log_level: Option<u8>,
   pub hostname: Option<String>,
-  pub debug_dump: Option<bool>
+  pub debug_dump: Option<bool>,
+  pub service_timeout: Option<u64>
 }
 
 // The final returned target
@@ -20,7 +21,8 @@ pub struct Target
   pub services: Vec<String>,
   pub logLevel: u8,
   pub hostname: String,
-  pub debugDump: bool
+  pub debugDump: bool,
+  pub serviceTimeout: u64
 }
 
 /**
@@ -48,6 +50,7 @@ pub fn source(name: String) -> Result<Target>
   let logLevel = target.log_level.unwrap_or(1);
   let hostname = target.hostname.unwrap_or(String::from("localhost"));
   let debugDump = target.debug_dump.unwrap_or(false);
+  let serviceTimeout = target.service_timeout.unwrap_or(5);
 
   if (target.debug_dump == Some(true) && !cfg!(debug_assertions))
   {
@@ -56,5 +59,5 @@ pub fn source(name: String) -> Result<Target>
     warn!("debug dump is enabled in target '{name}', but you are using a release build");
   }
 
-  Ok(Target { name, services, logLevel, hostname, debugDump })
+  Ok(Target { name, services, logLevel, hostname, debugDump, serviceTimeout })
 }
