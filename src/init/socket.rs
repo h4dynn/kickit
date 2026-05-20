@@ -184,15 +184,17 @@ impl Socket for Power
       fail!(stream, 0xbb);
     }
 
-    match (input[0])
-    {
-      Self::SHUTDOWN => poweroff(Mode::Shutdown).or_warn(),
-      Self::REBOOT => poweroff(Mode::Reboot).or_warn(),
-      Self::FORCE_SHUTDOWN => forcePoweroff(Mode::Shutdown).or_warn(),
-      Self::FORCE_REBOOT => forcePoweroff(Mode::Reboot).or_warn(),
-      // Write error byte to socket- unexpected input
-      _ => { fail!(stream, 0x0f); }
-    }
+    let _ = {
+      match (input[0])
+      {
+        Self::SHUTDOWN => poweroff(Mode::Shutdown).or_warn(),
+        Self::REBOOT => poweroff(Mode::Reboot).or_warn(),
+        Self::FORCE_SHUTDOWN => forcePoweroff(Mode::Shutdown).or_warn(),
+        Self::FORCE_REBOOT => forcePoweroff(Mode::Reboot).or_warn(),
+        // Write error byte to socket- unexpected input
+        _ => { fail!(stream, 0x0f); }
+      }
+    };
   }
 }
 

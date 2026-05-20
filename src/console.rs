@@ -21,7 +21,7 @@ pub trait HandleError: Sized
   // handle() functions like unwrap(): Return contents if OK or fatal if not
   fn handle(self) -> Self::OkType;
   // Do nothing with OK result, warn on error
-  fn or_warn(self);
+  fn or_warn(self) -> Option<Self::OkType>;
 }
 
 pub trait ExtendWithContext<OkType, ErrorType>
@@ -54,8 +54,26 @@ impl<S, F: ReturnError> HandleError for Result<S, F>
   type OkType = S;
   type ErrorType = F;
 
-  fn handle(self) -> Self::OkType { match (self) { Ok(c) => c, Err(e) => e.fatal() } }
-  fn or_warn(self) { if let Err(e) = self { e.warn() } }
+  fn handle(self) -> Self::OkType
+  {
+    match (self)
+    {
+      Ok(ok) => ok,
+      Err(error) => error.fatal()
+    }
+  }
+  fn or_warn(self) -> Option<Self::OkType>
+  {
+    match (self)
+    {
+      Ok(ok) => Some(ok),
+      Err(error) =>
+      {
+        error.warn();
+        None
+      }
+    }
+  }
 }
 
 // Assume here that the Option carries an error
@@ -64,8 +82,21 @@ impl<F: ReturnError> HandleError for Option<F>
   type OkType = ();
   type ErrorType = F;
 
-  fn handle(self) -> Self::OkType { if let Some(error) = self { error.fatal() } }
-  fn or_warn(self) { if let Some(e) = self { e.warn() } }
+  fn handle(self) -> Self::OkType
+  {
+    if let Some(error) = self
+    {
+      error.fatal()
+    }
+  }
+  fn or_warn(self) -> Option<Self::OkType>
+  {
+    if let Some(error) = self
+    {
+      error.warn();
+    }
+    None
+  }
 }
 
 // Like assert!() but less panicky

@@ -16,6 +16,27 @@ trait StartService
   async fn start(self) -> Result<()>;
 }
 
+trait AssessError<OkType>
+{
+  // Do not error if optional is true
+  fn assess(self, optional: bool) -> Option<OkType>;
+}
+
+impl<OkType> AssessError<OkType> for Result<OkType>
+{
+  fn assess(self, optional: bool) -> Option<OkType>
+  {
+    if (optional)
+    {
+      // We do not want to return an error, so only warn
+      self.or_warn()
+    }
+    else {
+      Some(self.handle())
+    }
+  }
+}
+
 impl StartService for Service
 {
   #[inline]
@@ -45,6 +66,7 @@ impl StartService for Service
 
     if (matches!(self.pattern, Standard | Forking))
     {
+      let optional = self.optional;
       /*
        * Move the log out of the Service & take ownership of it. This is because
        * if we used a referenced log, tokio would error out because it would
@@ -57,9 +79,9 @@ impl StartService for Service
       let process = self.process.ok_or(Error::Unknown.trace(format!("{}: Process missing!", &self.name)))?;
 
       // Watch the log for updates
-      task::spawn(async move { log.watch().handle() });
+      task::spawn(async move { log.watch().assess(optional) });
       // Supervise the service's daemon to make sure it doesn't die
-      task::spawn(async move { Service::supervise(&self.name, process).handle() });
+      task::spawn(async move { Service::supervise(&self.name, process).assess(optional) });
     }
     Ok(())
   }
