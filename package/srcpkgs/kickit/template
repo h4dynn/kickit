@@ -13,6 +13,12 @@ do_fetch()
   git clone https://github.com/h4dynn/kickit.git "$wrksrc"
 }
 
+pre_build()
+{
+  # This probably won't be installed by default
+  rustup target add x86_64-unknown-linux-musl
+}
+
 do_build()
 {
   cargo build --release --target x86_64-unknown-linux-musl
