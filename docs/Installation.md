@@ -8,7 +8,7 @@ careful to make sure you know what you're doing!
 You can add the repository to have `kickit` update alongside your other packages:
 
 ```sh
-$ echo "repository=https://h4dynn.github.io/void-linux" | sudo tee /etc/xbps.d/90-kickit-repository.conf
+$ sudo tee /etc/xbps.d/90-kickit-repository.conf <<< "repository=https://h4dynn.github.io/void-linux"
 ```
 
 And then, install it:

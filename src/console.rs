@@ -18,6 +18,7 @@ pub trait HandleError: Sized
 {
   type OkType;
   type ErrorType: ReturnError;
+
   // handle() functions like unwrap(): Return contents if OK or fatal if not
   fn handle(self) -> Self::OkType;
   // Do nothing with OK result, warn on error
@@ -101,8 +102,16 @@ impl<F: ReturnError> HandleError for Option<F>
 
 // Like assert!() but less panicky
 #[macro_export]
-macro_rules! affirm { ($t: expr, $f: expr) => { if (!$t) { return Err($f) } }; }
-
+macro_rules! affirm
+{
+  ($eval: expr, $error: expr) =>
+  {
+    if (!$eval)
+    {
+      return Err($error)
+    }
+  };
+}
 /*
  * Re-export our macro, so it matches our current module path
  * (i.e. it exports to crate::console::affirm as well as crate::affirm)

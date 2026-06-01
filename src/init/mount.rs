@@ -1,9 +1,9 @@
 //! Mount implementation layered over the `nix`
 
-use crate::{display_enum, OptionEmptyVec};
+use crate::{display_enum, wrap, OptionEmptyVec};
 use super::console::{Result, Error, ErrorTrace, ErrorResult};
 
-use std::{fmt, fmt::Display, path::Path, ops::{Deref, DerefMut}};
+use std::{fmt, fmt::Display, path::Path};
 
 // Mount flags & their corresponding bit value (MsFlags)
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -32,65 +32,31 @@ pub enum UnmountFlag
 
 display_enum!
 {
-  Flag
-  {
-    ReadOnly => "ro", NoSuid => "nosuid", NoDev => "nodev",
-    NoExec => "noexec", Remount => "remount", Bind => "bind",
-    Private => "private"
-  }
-}
-
-/*
- * Create a wrapped value - a struct with a single-object tuple, that can
- * be dereferenced to the object
- */
-macro_rules! wrap
-{
-  {
-    $(
-      #[derive($($implement: ident),*)]
-      $vis: vis struct $name: ident ($inner: ty)
-    );+
-  } =>
-  {
-    $(
-      #[derive($($implement, )*)]
-      $vis struct $name($inner);
-
-      impl Deref for $name
-      {
-        type Target = $inner;
-        // The compiler will automatically handle proper dereferencing after this
-        fn deref(&self) -> &$inner
-        {
-          &self.0
-        }
-      }
-      impl DerefMut for $name
-      {
-        fn deref_mut(&mut self) -> &mut $inner
-        {
-          &mut self.0
-        }
-      }
-    )*
+  Flag {
+    ReadOnly => "ro", NoSuid => "nosuid", NoDev => "nodev", NoExec => "noexec",
+    Remount => "remount", Bind => "bind", Private => "private"
   }
 }
 
 pub type Opt = String;
 
+// Mount flags (casted as u64), added together
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
+pub struct Flags(u64);
+
+// Custom filesystem-specific options
+#[derive(PartialEq, Eq, Clone, Debug, Default)]
+pub struct Opts(Vec<Opt>);
+
+// For optional use with `unmount`, which in turn calls `nix::mount::umount2`
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
+pub struct UnmountFlags(i32);
+
 wrap! {
-  // Mount flags (casted as u64), added together
-  #[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
-  pub struct Flags(u64);
-
-  // Custom filesystem-specific options
-  #[derive(PartialEq, Eq, Clone, Debug, Default)]
-  pub struct Opts(Vec<Opt>);
-
-  // For optional use with `unmount`, which in turn calls `nix::mount::umount2`
-  #[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
-  pub struct UnmountFlags(i32)
+  // Dereference to the first & only item in the tuple
+  impl Deref<Target = u64> for Flags;
+  impl Deref<Target = Vec<Opt>> for Opts;
+  impl Deref<Target = i32> for UnmountFlags;
 }
 
 impl From<Flags> for nix::mount::MsFlags
@@ -117,15 +83,14 @@ impl TryFrom<&str> for Flag
   {
     use Flag::{ReadOnly, NoSuid, NoDev, NoExec, Remount, Bind, Private};
 
-    Ok({
+    Ok(
       match (flag)
       {
-        "ro" => ReadOnly, "nosuid" => NoSuid, "nodev" => NoDev,
-        "noexec" => NoExec, "remount" => Remount, "bind" => Bind,
-        "private" => Private,
+        "ro" => ReadOnly, "nosuid" => NoSuid, "nodev" => NoDev, "noexec" => NoExec,
+        "remount" => Remount, "bind" => Bind, "private" => Private,
         _ => Err(Error::Unknown.trace(format!("Unrecognised mount flag: {flag}")))?
       }
-    })
+    )
   }
 }
 
@@ -145,7 +110,7 @@ impl Display for Opts
     if (!stringOpts.is_empty())
     {
       // Remove the end trailing comma if it's there
-      write!(f, "{}", stringOpts.strip_suffix(',').expect("Options formatting error"))?;
+      write!(f, "{}", stringOpts.strip_suffix(',').expect("Mount options formatting error"))?;
     }
     Ok(())
   }
@@ -154,14 +119,14 @@ impl Display for Opts
 #[macro_export]
 macro_rules! mountFlags
 {
-  [$($flag: tt),*] =>
+  [$($flag: expr),*] =>
   {
     {
       use $crate::init::mount::Flags;
       let mut flags = Flags::default();
 
       $(
-        *flags += $flag as u64;
+        *flags |= $flag as u64;
       )*
 
       flags
@@ -182,7 +147,7 @@ macro_rules! unmountFlags
       let mut flags = UnmountFlags::default();
 
       $(
-        *flags += $flag as i32;
+        *flags |= $flag as i32;
       )*
 
       flags
@@ -223,12 +188,8 @@ pub use mountOpts as opts;
 pub fn mount(from: Option<&str>, to: &str, fsType: Option<&str>, flags: Flags, opts: Option<&Opts>)
   -> Result<()>
 {
-  /*
-   * We have to do a manual map here because if we map like:
-   * `.map(|x| &x as &str)`
-   * ..then the compiler throws this error:
-   * "returns a value referencing data owned by the current function"
-   */
+  use nix::mount::mount;
+
   #[allow(clippy::manual_map)]
   let nixOpts =
   {
@@ -241,9 +202,7 @@ pub fn mount(from: Option<&str>, to: &str, fsType: Option<&str>, flags: Flags, o
     }
   };
 
-  nix::mount::mount(from, to, fsType, flags.into(), nixOpts).into_trace(Error::SysFsMount)?;
-
-  Ok(())
+  mount(from, to, fsType, flags.into(), nixOpts).into_trace(Error::SysFsMount)
 }
 
 /**
@@ -304,21 +263,21 @@ pub fn mountFstabEntries() -> Result<()>
    */
   macro_rules! lookup
   {
-    ($how: literal = $with: expr) =>
+    ($ty: ident = $id: ident) =>
     {
       {
         // Most of the time it will be here
-        if (path!("/dev", "disk", format!("by-{}", $how), $with).is_symlink())
+        if (path!("/dev", "disk", format!("by-{}", stringify!($ty)), $id).is_symlink())
         {
-          Ok(format!("/dev/disk/by-{}/{}", $how, $with))
+          Ok(format!("/dev/disk/by-{}/{}", stringify!($ty), $id))
         }
         // On some devices (like arm tablets) it will be here instead
-        else if (path!("/dev", "block", format!("by-{}", $how), $with).is_symlink())
+        else if (path!("/dev", "block", format!("by-{}", stringify!($ty)), $id).is_symlink())
         {
-          Ok(format!("/dev/block/by-{}/{}", $how, $with))
+          Ok(format!("/dev/block/by-{}/{}", stringify!($ty), $id))
         }
         else {
-          Err(Error::Unknown.trace(&format!("Lookup {}={} failed, no target was found!", $how, $with)))
+          Err(Error::Unknown.trace(&format!("Lookup {}={} failed, no target was found!", stringify!($ty), $id)))
         }
       }
     };
@@ -340,35 +299,38 @@ pub fn mountFstabEntries() -> Result<()>
     // Split up by spaces, so we can parse each entry's information
     let entry: Vec<&str> = stringEntry.split_ascii_whitespace().collect();
 
-    let (rawSource, dest) = (entry[0], entry[1]);
-    let source =
+    if (entry.len() != 6)
     {
-      // Notify to the user what we are mounting
-      status!("Mounting: {rawSource} -> {dest}");
+      return Err(Error::FstabParse.trace(format!("Expected a line with 6 elements, but found {}", entry.len())))
+    }
 
-      if (rawSource == "auto")
+    // The raw source may be a lookup, so we change it in the `source` value
+    let (rawSource, dest) = (entry[0], entry[1]);
+    let source = {
+      // Let the libc mount function infer the source on its own
+      if (matches!(rawSource, "auto" | "none"))
       {
-        // Let the mount function infer the source
         None
       }
       else {
-        // Split the source into an array, for sources like `UUID=<UUID>`, to resolve them into paths
-        Some({
-          match (rawSource.rsplit('=').collect::<Vec<&str>>()[..])
+        // Split the source by lookup only once
+        Some(if let Some((lookup, id)) = rawSource.split_once('=')
+        {
+          &match (lookup)
           {
-            // Turn each lookup call into its dev path, mapped by the kernel
-            [partUuid, "PARTUUID"] => &lookup!("partuuid" = partUuid)?,
-            [uuid, "UUID"] => &lookup!("uuid" = uuid)?,
-            [label, "LABEL"] => &lookup!("label" = label)?,
-            [id, "ID"] => &lookup!("id" = id)?,
-            // No changes needed here!
-            _ => rawSource
-          }
+            "PARTUUID" => lookup!(partuuid = id), "UUID" => lookup!(uuid = id),
+            "LABEL" => lookup!(label = id), "ID" => lookup!(id = id),
+            _ => Err(Error::FstabParse.trace(format!("Unknown lookup type: {lookup}")))
+          }?
+        }
+        else {
+          // No changes needed here!
+          rawSource
         })
       }
     };
-    let fsType =
-    {
+    let fsType = {
+      // Only pass the filesystem type if its valid
       if (matches!(entry[2], "auto" | "none"))
       {
         // Let the mount function infer the filesystem's type
@@ -409,6 +371,11 @@ pub fn mountFstabEntries() -> Result<()>
       // `.empty_none()` turns an vector into a Option, where if its empty None is produced
       (flags, opts.empty_none())
     };
+
+    if let Some(src) = source
+    {
+      status!("Mounting: {src} -> {dest}");
+    }
 
     mount(source, dest, fsType, flags, opts.as_ref())?;
   }

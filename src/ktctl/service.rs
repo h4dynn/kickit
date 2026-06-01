@@ -42,6 +42,12 @@ impl Service
     fs::metadata(path!("/run/kickit/service/", &self.name, "pid")).is_ok()
   }
 
+  #[must_use]
+  pub fn is_sandboxed(&self) -> bool
+  {
+    path!("/run/kickit/service/", &self.name, "container").is_dir()
+  }
+
   /**
     * # Errors
     *
@@ -57,7 +63,7 @@ impl Service
 
       // Read the PID in little-endian ordered bytes
       let pid = u32::from_le_bytes(rawPid.try_into()
-                  .map_err(|_| Error::Format.trace(&format!("Invalid PID for {}", &self.name)))?);
+                  .map_err(|_| Error::Format.trace(format!("Invalid PID for {}", &self.name)))?);
 
       Ok(Some(pid))
     }
@@ -106,11 +112,11 @@ impl Service
         if (self.is_standard())
         {
           // Standard services will contain more information (e.g. pid)
-          "├─ Status: "
+          "├─ Status:   "
         }
         else {
           // Non-standard services will just have a status & nothing else
-          "└─ Status: "
+          "└─ Status:   "
         }
       }),
       if (self.is_standard())
@@ -154,10 +160,15 @@ impl Service
     println!("{}{}{}", Colour::BOLD, self.name, Colour::RESET);
     println!("{status}");
 
+    if (self.is_sandboxed())
+    {
+      println!("├─ Sandbox:  {}active{}", Colour::GREEN, Colour::RESET);
+    }
+
     // Non-standard services will not have an active PID
     if (self.is_standard())
     {
-      println!("└─ PID:    {}", self.pid()?.unwrap());
+      println!("└─ PID:      {}", self.pid()?.unwrap());
     }
 
     // Print newline seperator for next service
@@ -277,7 +288,7 @@ impl Service
         {
           // Must be the 14th byte or else something is wrong
           affirm!(timestamp.len() == 13 && logContents.is_empty(),
-                  Error::Format.trace(&format!("Unexpected byte 0x8F on byte {logByteCount}"))
+                  Error::Format.trace(format!("Unexpected byte 0x8F on byte {logByteCount}"))
                                 .context(&self.name));
 
           fromInit = true;

@@ -15,6 +15,7 @@ pub enum Error
   #[error("Invalid arguments provided")] InvalidArguments,
   #[error("kickit is not running")] InitNotRunning,
   #[error("Failed to access kickit work directory")] AccessRunFsFail,
+  #[error("Failed to access kickit resources")] AccessResource,
   #[error("An unrecognised service was provided")] BadService,
   #[error("Invalid file encoding (expected UTF-8)")] Format,
   #[error("Failed to access log file from service")] LogAccessFail,
@@ -118,7 +119,7 @@ impl ReturnError for ErrorTrace
 
 impl Error
 {
-  pub fn trace(self, trace: &(impl Display + ?Sized)) -> ErrorTrace
+  pub fn trace(self, trace: impl Display) -> ErrorTrace
   {
     ErrorTrace { kind: self, context: None, trace: trace.to_string() }
   }
@@ -126,7 +127,7 @@ impl Error
 
 impl ErrorTrace
 {
-  pub fn context(self, context: &(impl Display + ?Sized)) -> Self
+  pub fn context(self, context: impl Display) -> Self
   {
     Self { kind: self.kind, context: Some(context.to_string()), trace: self.trace }
   }

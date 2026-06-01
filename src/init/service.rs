@@ -1,6 +1,6 @@
 //! Service implementation
 
-use std::{fs, io, process::{Command, Child}, sync::OnceLock};
+use std::{fs, path::{Path, PathBuf}, fmt, io, process::{Command, Child}, sync::OnceLock};
 use serde::Deserialize;
 use crate::{init::console::{Error, ErrorResult, Result},
       console::{affirm, ExtendWithContext}, file_path, path, oncelock};
@@ -16,6 +16,7 @@ pub struct Service
   pub pattern: Pattern,
   pub logger: bool,
   shout: bool,
+  sandbox: Option<SandboxOptions>,
   runFolder: Option<RunDirectory>,
   exec: Vec<String>,
 
@@ -37,12 +38,26 @@ pub struct Logger
   reader: Option<io::PipeReader>
 }
 
+#[derive(Clone, PartialEq, Eq, Deserialize, Debug)]
+pub struct SandboxOptions
+{
+  // List of all the flags in string form, such as "share_vm" or "new_user"
+  flags: Vec<String>,
+  // What binaries this container will be using
+  import: Vec<String>,
+  // Bind mount the system pseudo filesystems, required for majority of services
+  bindSystemFs: Option<bool>,
+  // Bind mount the dbus socket, some services like lightdm or elogind will need this
+  bindDbus: Option<bool>,
+  // Share the provided sandboxed files with the rest of the OS via bind mount
+  files: Option<Vec<String>>
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 pub enum State
 {
   Up,
-  #[default]
-  Down
+  #[default] Down
 }
 use State::{Up, Down};
 
@@ -82,11 +97,17 @@ struct Config
   pattern: Option<Pattern>,
   logger: Option<bool>,
   run_folder: Option<RunDirectory>,
+  sandbox: Option<SandboxOptions>,
   exec: Vec<String>
 }
 
 impl Service
 {
+  fn run_dir(&self, of: impl fmt::Display) -> PathBuf
+  {
+    path!("/run/kickit/service", &self.name, of.to_string())
+  }
+
   /**
     * # Errors
     * * Service's configuration doesn't exist or can't be read
@@ -98,7 +119,7 @@ impl Service
   {
     macro_rules! set
     {
-      ($config: tt, $($set: tt),*) =>
+      ($config: tt [$($set: tt),*]) =>
       {
         $(
           // Look for the requested value in the configuration or use the default
@@ -124,15 +145,15 @@ impl Service
       Error::FileNotFound.trace(format!("Service executable missing: {name}")));
 
     // Optional values: fallback to default if not provided (optional & shout are false)
-    set!(config, description, optional, shout, pattern);
+    set!(config[description, optional, shout, pattern]);
 
     let logger = config.logger.unwrap_or(true);
 
     Ok(Self
     {
-      name: name.into(), description, optional, shout,
-      runFolder: config.run_folder, pattern, logger,
-      exec: config.exec, state: Down, process: None,
+      name: name.into(), description, optional, shout, sandbox: config.sandbox,
+      runFolder: config.run_folder,
+      pattern, logger, exec: config.exec, state: Down, process: None,
       log: OnceLock::new()
     })
   }
@@ -148,43 +169,31 @@ impl Service
     use nix::unistd::{chown, Uid, Gid};
     use super::TARGET;
     use tokio::time::timeout;
-    use std::{fs::{File, Permissions}, io::{Write, BufRead, BufReader, pipe},
+    use std::{fs::{File, Permissions}, path::PathBuf, io::{Write, BufRead, BufReader, pipe},
                   os::unix::fs::PermissionsExt, time::Duration};
 
     // An empty zstd file, created from /dev/null (`$ zstd -1c < /dev/null | xxd`)
     const EMPTY_ZSTD: [u8; 13] = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01, 0x00,
                                     0x00, 0x99, 0xe9, 0xd8, 0x51];
 
-    affirm!(self.state == Down, Error::ServiceUp.trace("already up").context(&self.name));
-
-    // Our arguments for the executable
-    let args = {
-      // Check to make sure we don't index past the vector's length (causes a panic)
-      if (self.exec.len() == 1)
-      {
-        &Vec::new()
-      }
-      else {
-        &self.exec[1..]
-      }
-    };
+    affirm!(self.state == Down, Error::ServiceUp.trace("already up!").context(&self.name));
 
     if (self.logger)
     {
       // Create the empty log file
       let mut logFile = File::options().read(true).write(true).create_new(true)
-                          .open(path!("/run/kickit/service", &self.name, "log"))
-                          .into_trace(Error::RunFsFail).context(&self.name)?;
+                          .open(self.run_dir("log"))
+                          .into_trace(Error::ServiceAccess).context(&self.name)?;
 
       // Make log file inaccessible to anybody but the root user
-      logFile.set_permissions(Permissions::from_mode(0o600)).into_trace(Error::RunFsFail)?;
+      logFile.set_permissions(Permissions::from_mode(0o600)).into_trace(Error::ServiceAccess)?;
 
       /*
        * The log file is going to be decompressed later on to view its contents,
        * the decompressor will fail if the file is empty so this provides some
        * valid but empty zstd data
        */
-      logFile.write_all(&EMPTY_ZSTD).into_trace(Error::RunFsFail)?;
+      logFile.write_all(&EMPTY_ZSTD).into_trace(Error::ServiceAccess)?;
 
       if (self.log.set(Logger::new(self.name.clone(), self.shout, logFile)).is_err())
       {
@@ -196,12 +205,12 @@ impl Service
     if let Some(run) = &self.runFolder
     {
       let path = path!("/run", &run.name);
-      fs::create_dir(&path).into_trace(Error::RunFsFail).context(&run.name)?;
+      fs::create_dir(&path).into_trace(Error::ServiceAccess).context(&run.name)?;
 
       // Change the owner (UID) & group (GID)
-      chown(&path, Some(Uid::from_raw(run.owner)), Some(Gid::from_raw(run.group))).into_trace(Error::RunFsFail)?;
+      chown(&path, Some(Uid::from_raw(run.owner)), Some(Gid::from_raw(run.group))).into_trace(Error::ServiceAccess)?;
       // Set the permissions mode
-      fs::set_permissions(path, Permissions::from_mode(run.mode)).into_trace(Error::RunFsFail)?;
+      fs::set_permissions(path, Permissions::from_mode(run.mode)).into_trace(Error::ServiceAccess)?;
     }
 
     /*
@@ -209,6 +218,27 @@ impl Service
      * since some services will output logs to stdout & some to stderr
      */
     let (reader, writer) = pipe().into_trace(Error::Unknown)?;
+
+    // The executable name we are going to call, plus its arguments
+    let (exec, args): (PathBuf, Vec<String>) =
+    {
+      /*
+       * Convert the sandbox options into arguments for warden to then handle.
+       * The reason why we don't just start the sandbox from here is because using
+       * `unshare` will cause the init to also unshare (bad!), so we use the warden
+       * executable to start a new, seperate command which can be safely unshared
+       */
+      if let Some(sandboxOptions) = &self.sandbox
+      {
+        // Setup the container rootfs
+        sandboxOptions.setup(self.run_dir("container"))?;
+        (PathBuf::from("/usr/lib/kickit/warden"), sandboxOptions.wardenArgs(self.run_dir("container"), &mut self.exec)?)
+      }
+      else {
+        (PathBuf::from(&self.exec[0]), self.exec[1..].to_vec())
+      }
+    };
+
     /*
      * Based on the service's pattern we either spawn it in the background
      * and watch it or run it in foreground and wait for it to finish
@@ -218,18 +248,18 @@ impl Service
       Standard | Forking =>
       {
         // Spawn the process in the background asynchronous to the program
-        let process = Command::new(&self.exec[0]).args(args)
+        let process = Command::new(exec).args(args)
+                        .current_dir("/")
                         .stdout(writer.try_clone().into_trace(Error::Unknown)?)
                         .stderr(writer)
                         .spawn()
                         .into_trace(Error::ServiceUp).context(&self.name)?;
 
         // Where our pid info is stored
-        let mut pidFile = File::create_new(path!("/run/kickit/service", &self.name, "pid"))
-                                  .into_trace(Error::RunFsFail)?;
+        let mut pidFile = File::create_new(self.run_dir("pid")).into_trace(Error::ServiceAccess)?;
 
         // Write the PID in little-endian ordered bytes
-        pidFile.write_all(&process.id().to_le_bytes()).into_trace(Error::RunFsFail)?;
+        pidFile.write_all(&process.id().to_le_bytes()).into_trace(Error::ServiceAccess)?;
         // Transfer the process to our service
         self.process = Some(process);
 
@@ -242,7 +272,8 @@ impl Service
       RunOnce =>
       {
         // Start the service's process & wait for it to finish
-        let mut process = Command::new(&self.exec[0]).args(args)
+        let mut process = Command::new(exec).args(args)
+                            .current_dir("/")
                             .stderr(writer.try_clone().into_trace(Error::Unknown)?)
                             .stdout(writer)
                             .spawn()
@@ -278,12 +309,12 @@ impl Service
         }
 
         // Signal to ktctl that we have finished
-        File::create_new(path!("/run/kickit/service", &self.name, "exited")).into_trace(Error::RunFsFail)?;
+        File::create_new(self.run_dir("exited")).into_trace(Error::ServiceAccess)?;
 
         if let Some(log) = self.log.get_mut()
         {
           // Make logfile read-only as the process has finished
-          log.file.set_permissions(Permissions::from_mode(0o400)).into_trace(Error::RunFsFail)?;
+          log.file.set_permissions(Permissions::from_mode(0o400)).into_trace(Error::ServiceAccess)?;
         }
         // done!!!!!!!!!!!!!!!!!!!!!!!!!
       }
@@ -379,6 +410,132 @@ impl Service
   }
 }
 
+impl SandboxOptions
+{
+  /**
+    * # Errors
+    *
+    * * Failed to create a required system directory in the container (e.g. etc, usr, sys, dev, proc),
+    * * Failed to change directory to the container for whatever reason,
+    * * Failed to create a required symlink (e.g. bin -> usr/bin)
+    */
+  // Create the container rootfs, with bind mounts
+  pub fn setup(&self, containerPath: impl AsRef<Path>) -> Result<()>
+  {
+    use std::{fs::create_dir, env::set_current_dir, os::unix::fs::symlink};
+
+    macro_rules! mkdir
+    {
+      ($dir: expr) =>
+      {
+        create_dir($dir).into_trace(Error::ServiceSandboxInit)?;
+      }
+    }
+
+    let container: &Path = containerPath.as_ref();
+
+    // This is where our temporary container rootfs will be stored
+    mkdir!(container);
+
+    mkdir!(path!(container, "etc"));
+    // Create the main usr directories
+    mkdir!(path!(container, "usr"));
+    mkdir!(path!(container, "usr", "bin"));
+    mkdir!(path!(container, "usr", "lib"));
+    mkdir!(path!(container, "usr", "share"));
+
+    // Create system pseudo filesystem directories
+    for systemFsDir in ["sys", "dev", "proc", "run", "tmp"]
+    {
+      mkdir!(path!(container, systemFsDir));
+    }
+
+    // Change to this directory to make accurate symlinks that work both in & outside of chroot
+    set_current_dir(path!(container, "usr")).into_trace(Error::ServiceSandboxInit)?;
+    symlink("lib", path!(container, "usr", "lib64")).into_trace(Error::ServiceSandboxInit)?;
+
+    set_current_dir(container).into_trace(Error::ServiceSandboxInit)?;
+
+    symlink("usr/lib", path!(container, "lib")).into_trace(Error::ServiceSandboxInit)?;
+    // Assume that we are running on a 64-bit system here
+    symlink("usr/lib", path!(container, "lib64")).into_trace(Error::ServiceSandboxInit)?;
+    symlink("usr/bin", path!(container, "bin")).into_trace(Error::ServiceSandboxInit)?;
+
+    Ok(())
+  }
+
+  fn wardenArgs(&self, container: impl AsRef<Path>, cmdArgs: &mut Vec<String>) -> Result<Vec<String>>
+  {
+    use std::path::Path;
+
+    let mut args = Vec::new();
+
+    // Vast majority of services will require this
+    if (self.bindSystemFs.unwrap_or_default())
+    {
+      args.push("--mount-system-fs".to_owned());
+    }
+    // For services such as elogind or lightdm which use the dbus daemon
+    if (self.bindDbus.unwrap_or_default())
+    {
+      args.push("--dbus".to_owned());
+    }
+
+    for flag in (&self.flags)
+    {
+      // Flag arg can be either 'new' or 'share', so for NsFlag::NewMount it would be 'new_mount'
+      let (flagArg, flagName) = flag.split_once('_').ok_or(Error::ServiceSandboxBadOpt.trace(flag))?;
+
+      match (flagArg)
+      {
+        "share" => args.push(String::from("--share")),
+        "new" => args.push(String::from("--new")),
+        _ => return Err(Error::ServiceSandboxBadOpt.trace(format!("Expected either share/new type flag, got '{flagArg}'")))
+      }
+
+      // Cut off the flag arg part, as we have turned it into its relative argument
+      args.push(flagName.to_owned());
+    }
+
+    for bind in (&self.import)
+    {
+      let file: &Path = bind.as_ref();
+
+      // Binding directories & files have different implementation due to creating parent dirs/files
+      if (file.is_dir())
+      {
+        args.push(String::from("--bind-dir"));
+      }
+      else if (file.is_file())
+      {
+        args.push(String::from("--bind-file"));
+      }
+      else {
+        return Err(Error::ServiceSandboxInit.trace(format!("No such file or directory: {bind}")))
+      }
+
+      args.push(bind.to_owned());
+    }
+
+    // The first argument will be the executable, so we take it away from the vector
+    let exec = cmdArgs.remove(0);
+    // Tell warden where our root container is
+    args.push(container.as_ref().display().to_string());
+    // This is the executable that warden will run
+    args.push(exec);
+
+    if (cmdArgs.len() > 1)
+    {
+      // Tell warden to pass over the rest of the arguments to the command we are executing
+      args.push("--".to_owned());
+      // Make sure we can index past this to avoid a panic
+      args.extend_from_slice(cmdArgs.as_slice());
+    }
+
+    Ok(args)
+  }
+}
+
 impl Logger
 {
   #[must_use]
@@ -430,7 +587,7 @@ impl Logger
         for maybeByte in (BufReader::new(logReader).bytes())
         {
           // Panic if byte is Err (should never be)
-          let byte = maybeByte.into_trace(Error::ServiceLog).context(&self.name)?;
+          let byte = maybeByte.into_trace(Error::ServiceLogContent).context(&self.name)?;
 
           // This is our EOF- we know to stop reading bytes here
           if (byte == b'\n')
@@ -486,17 +643,17 @@ impl Logger
      * Because this function will be called multiple times, changing the seek
      * on the log file, we do this to ensure we are reading from the beginning
      */
-    self.file.rewind().into_trace(Error::Unknown)?;
+    self.file.rewind().into_trace(Error::ServiceLogContent)?;
 
     // This is the zstd decoder which wraps over the file & implements Read
-    let mut decoder = StreamingDecoder::new(&self.file).into_trace(Error::Unknown)?;
+    let mut decoder = StreamingDecoder::new(&self.file).into_trace(Error::ServiceLogCompress)?;
     let mut contents = Vec::new();
     // Read the decompressed log contents
-    decoder.read_to_end(&mut contents).into_trace(Error::AccessLog)?;
+    decoder.read_to_end(&mut contents).into_trace(Error::ServiceLogCompress)?;
 
     // This is to timestamp the log at the time it was received
     let timeNow = SystemTime::now().duration_since(UNIX_EPOCH)
-                                    .into_trace(Error::Unknown)?
+                                    .into_trace(Error::Time)?
                                     .as_millis()
                                     .to_string();
 
@@ -532,7 +689,7 @@ impl Logger
      * Reading from the logfile changes the cursor position so we set it back to
      * the beginning to overwrite the file instead of appending it
      */
-    self.file.rewind().into_trace(Error::Unknown)?;
+    self.file.rewind().into_trace(Error::ServiceLogContent)?;
     // Overwrite log file with new contents
     compress(Cursor::new(contents), &mut self.file, CompressionLevel::Fastest);
     self.line += 1;

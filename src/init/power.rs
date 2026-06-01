@@ -34,7 +34,7 @@ pub fn forcePoweroff(mode: Mode) -> Result<()>
 {
   use nix::sys::reboot::reboot;
 
-  reboot(mode.into()).into_trace(Error::Unknown)?;
+  reboot(mode.into()).into_trace(Error::PowerCritical)?;
   Ok(())
 }
 
@@ -81,10 +81,10 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
 
     inner
   };
-  let mounts = fs::read_to_string("/proc/mounts").into_trace(Error::Unknown)?;
+  let mounts = fs::read_to_string("/proc/mounts").into_trace(Error::ProcFs)?;
 
   // This makes sure that when we kill the services, the service manager doesn't throw an error
-  oncelock! { let POWER_OFF = true }?;
+  oncelock! { POWER_OFF = true }?;
 
   for (pid, name) in (pidsAndNames)
   {
@@ -126,7 +126,7 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
   }
 
   // Poweroff/reboot!!!!
-  reboot(mode.into()).into_trace(Error::Unknown)?;
+  reboot(mode.into()).into_trace(Error::PowerCritical)?;
   // Should never reach this point
   Ok(())
 }

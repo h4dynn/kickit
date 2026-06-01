@@ -31,7 +31,7 @@ jobs:
           ./xbps-src pkg kickit
 
       - name: Create release (pre-release)
-        if: ${{ !startsWith(github.event.head_commit.message, 'release') && github.event_name != 'workflow_dispatch' }}
+        if: ${{ !startsWith(github.event.head_commit.message, 'release') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
@@ -40,7 +40,7 @@ jobs:
           gh release create "unstable-$(date +%s)" *.xbps -F CHANGELOG.md -R "h4dynn/kickit" -t "$(date +"%d %b %Y, %H:%M")" -p
 
       - name: Create release
-        if: ${{ startsWith(github.event.head_commit.message, 'release') || github.event_name == 'workflow_dispatch' }}
+        if: ${{ startsWith(github.event.head_commit.message, 'release') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}

@@ -12,30 +12,26 @@ pub mod target;
 pub mod socket;
 pub mod power;
 
-use std::sync::OnceLock;
-use crate::console::ExtendWithContext;
+use crate::{oncelock, console::ExtendWithContext};
 use self::console::{Error, Result};
 
-// Once the target is sourced its configuration will be stored here
-pub static TARGET: OnceLock<self::target::Target> = OnceLock::new();
-pub static TARGET_NAME: OnceLock<String> = OnceLock::new();
-// If set to true, master log entries won't be shown on console
-pub static QUIET: OnceLock<bool> = OnceLock::new();
-// Tells the service watcher to not care if a service is killed, set by `poweroff(_, _)`
-pub static POWER_OFF: OnceLock<bool> = OnceLock::new();
+oncelock! {
+  // Once the target is sourced its configuration will be stored here
+  pub static TARGET: self::target::Target;
+  pub static TARGET_NAME: String;
+  // If set to true, master log entries won't be shown on console
+  pub static QUIET: bool;
+  // Tells the service watcher to not care if a service is killed, set by `poweroff(_, _)`
+  pub static POWER_OFF: bool;
+}
+
+// Some distros such as Alpine will use more lightweight shells, such as ash
+#[cfg(feature = "posix_sh")]
+pub(crate) const SHELL: &str = "/bin/sh";
 
 // The default shell will be bash unless the "posix_sh" feature is set
-pub(crate) const SHELL: &str =
-{
-  // Some distros such as Alpine will use more lightweight shells, such as ash
-  if (cfg!(feature = "posix_sh"))
-  {
-    "/bin/sh"
-  }
-  else {
-    "/bin/bash"
-  }
-};
+#[cfg(not(feature = "posix_sh"))]
+pub(crate) const SHELL: &str = "/bin/bash";
 
 /**
   * # Errors
@@ -55,24 +51,17 @@ pub fn cmdlineParam(param: &str) -> Result<Option<String>>
                     .into_trace(Error::FileNotFound).context("/proc/cmdline")?;
 
   // Split the cmdline's parameters by spaces
-  for rawCmdlineParam in (cmdline.split(' '))
+  for cmdlineParam in (cmdline.split(' '))
   {
-    // Split by equals so that if the param has a value we can return it
-    let mut cmdlineParam: Vec<&str> = rawCmdlineParam.trim_end_matches('\n').split('=').collect();
-
-    if (cmdlineParam[0] == param)
+    // Parameter has a value to give
+    if let Some((key, value)) = cmdlineParam.trim_end_matches('\n').split_once('=') && (key == param)
     {
-      // If there is no value for this param so return none
-      return if (cmdlineParam.len() == 1)
-      {
-        Ok(None)
-      }
-      else {
-        // Remove the param's name, just get its value
-        cmdlineParam.remove(0);
-        // Collect the values back into a String
-        Ok(Some(cmdlineParam.into_iter().collect()))
-      }
+      return Ok(Some(value.to_owned()))
+    }
+    // No value, just bool parameter
+    else if (cmdlineParam == param)
+    {
+      return Ok(None)
     }
   }
 

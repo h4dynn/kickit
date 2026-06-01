@@ -153,7 +153,7 @@ fn setupRunFs(services: &Vec<String>, debugDump: bool) -> Result<()>
     use std::{time::{SystemTime, UNIX_EPOCH}, fs};
 
     // Use the timestamp as an identifier for said folder
-    let time = SystemTime::now().duration_since(UNIX_EPOCH).into_trace(Error::Unknown)?
+    let time = SystemTime::now().duration_since(UNIX_EPOCH).into_trace(Error::Time)?
                   .as_millis()
                   .to_string();
 
@@ -260,7 +260,7 @@ async fn main()
   sanity(noInit).handle();
 
   // Respect the quiet argument if provided
-  oncelock! { let QUIET = cmdlineParam("quiet") == Ok(None) }.handle();
+  oncelock! { QUIET = cmdlineParam("quiet") == Ok(None) && !noInit }.handle();
 
   status!("kickit {}", kickit::PRETTY_VERSION());
 
@@ -286,8 +286,8 @@ async fn main()
    * By having our target in a OnceLock we ensure that others parts of the init
    * can access it hassle-free for e.g. logging or services
    */
-  oncelock! { let TARGET = target::source(targetName.to_owned()).handle() }.handle();
-  oncelock! { let TARGET_NAME = targetName.to_owned() }.handle();
+  oncelock! { TARGET = target::source(targetName.to_owned()).handle() }.handle();
+  oncelock! { TARGET_NAME = targetName.to_owned() }.handle();
 
   // We've just set it so this shouldn't fail
   let target = TARGET.get().ok_or(Error::Unknown.trace("target is inaccessible")).handle();
@@ -302,12 +302,12 @@ async fn main()
     mountSysFilesystems().handle();
 
     status!("Setting hostname");
-    let mut hostname = File::create("/proc/sys/kernel/hostname").into_trace(Error::Unknown).handle();
-    hostname.write_all(target.hostname.as_bytes()).into_trace(Error::Unknown).handle();
-  }
+    let mut hostname = File::create("/proc/sys/kernel/hostname").into_trace(Error::ProcFs).handle();
+    hostname.write_all(target.hostname.as_bytes()).into_trace(Error::ProcFs).handle();
 
-  // Now we can mount all the custom entries in /etc/fstab
-  mountFstabEntries().handle();
+    // Now we can mount all the custom entries in /etc/fstab
+    mountFstabEntries().handle();
+  }
 
   status!("Setting up work directory");
   setupRunFs(&target.services, target.debugDump).handle();

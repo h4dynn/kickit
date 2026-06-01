@@ -1,6 +1,0 @@
-Usage: ktctl log [ARGUMENTs..] [SERVICE]
-View a service's logs (requires root access)
-
-Arguments:
- --plain              Plain output (no colours + timestamp as millis)
- --service-only       Ignore any messages from init

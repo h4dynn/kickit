@@ -31,7 +31,7 @@ pub trait Request: Socket + Sized + Send + Sync
       // An 0x0f byte means the operation failed
       if (out.as_slice() == [0x0f])
       {
-        Err(Error::SocketAccessFail.trace(&format!("Socket error after requesting {}", Self::NAME)))
+        Err(Error::SocketAccessFail.trace(format!("Socket error after requesting {}", Self::NAME)))
       }
       else {
         Ok(out)

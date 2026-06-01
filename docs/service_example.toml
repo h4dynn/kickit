@@ -28,7 +28,20 @@ logger = true
 # If the service you're using needs a run directory to be created
 # (like dbus does), you can specify the settings for one here
 #
-run_folder = { name = "hello", owner = 0, group = 0, mode = 0o755 }
+#run_folder = { name = "hello", owner = 0, group = 0, mode = 0o755 }
 
 # The path of the executable followed by the argument(s)
 exec = ["/bin/bash", "-c", "echo 'Hello world' >&2"]
+
+#
+# Create a chroot container with new, unshared namespaces. This is optional
+# but provides extra security
+#
+[sandbox]
+flags = [
+  "new_namespace", "new_cgroup", "new_uts", "new_ipc", "new_user", "new_pid", "new_net"
+]
+import = [
+  "/usr/bin/bash",
+  "/usr/lib/libc.so.6", "/usr/lib/libreadline.so.8", "/usr/lib/libncursesw.so.6"
+]

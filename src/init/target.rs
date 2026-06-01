@@ -39,7 +39,7 @@ pub fn source(name: String) -> Result<Target>
 
   // Read toml contents from target config to string
   let targetToml = fs::read_to_string(file_path!(path!(crate::PREFIX, "target"), &name, "toml"))
-                    .into_trace(Error::FileNotFound)?;
+                    .into_trace(Error::TargetNotFound)?;
 
   // Source the configuration
   let target: TargetSource = toml::from_str(&targetToml).into_trace(Error::TargetParse)?;

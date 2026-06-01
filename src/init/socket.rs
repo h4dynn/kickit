@@ -1,8 +1,7 @@
 //! Socket implementations for init
 
 use tokio::net::UnixStream;
-use crate::{socket::{Socket, Core, Log, Power},
-              init::console::{Result, Error, ErrorResult},
+use crate::{socket::{Socket, Core, Log, Power}, init::console::{Result, Error, ErrorResult},
               console::{HandleError, ExtendWithContext}};
 
 /*
@@ -19,21 +18,21 @@ pub trait Open: Socket + Sync + 'static
       use std::{os::unix::fs::PermissionsExt, fs::{Permissions, set_permissions}};
       use tokio::net::UnixSocket;
 
-      let path = self.path();
-      let permissions = Permissions::from_mode(if (Self::PRIVATE) { 0o600 } else { 0o666 });
+      let mode = if (Self::PRIVATE) { 0o600 } else { 0o666 };
+      let permissions = Permissions::from_mode(mode);
 
-      let sock = UnixSocket::new_stream().into_trace(Error::Socket)?;
+      let sock = UnixSocket::new_stream().into_trace(Error::SocketStartup)?;
       // Bind (start) our socket here
-      sock.bind(&path).into_trace(Error::RunFsFail).context(path.display())?;
+      sock.bind(self.path()).into_trace(Error::RunFsFail).context(self.path().display())?;
 
       /*
        * thanks <https://users.rust-lang.org/t/how-to-manage-permissions-of-a-unixlistener/31039/8>
        * for having an answer for this it really hurt my head
        */
-      set_permissions(&path, permissions).into_trace(Error::RunFsFail).context(path.display())?;
+      set_permissions(self.path(), permissions).into_trace(Error::ServiceAccess).context(self.path().display())?;
 
       // Set max listeners at a time to 1
-      let listener = sock.listen(Self::MAX_LISTENERS).into_trace(Error::Socket)?;
+      let listener = sock.listen(Self::MAX_LISTENERS).into_trace(Error::SocketIo)?;
 
       while let Ok((stream, _)) = listener.accept().await
       {
@@ -55,7 +54,7 @@ macro_rules! fail
   ($stream: expr, $byte: tt) =>
   {
     // Write our "error byte" to signal to peer an error has occurred
-    $stream.try_write(&[$byte]).into_trace(Error::Socket).or_warn();
+    $stream.try_write(&[$byte]).into_trace(Error::SocketIoWrite).or_warn();
     // Exit our function- do nothing more here
     return
   };
@@ -135,7 +134,7 @@ impl Socket for Core
       // Send an error for unknown bytes
       _ => { fail!(stream, 0x0f); }
     }
-      .into_trace(Error::Socket).or_warn();
+      .into_trace(Error::SocketIoWrite).or_warn();
   }
 }
 
@@ -159,7 +158,7 @@ impl Socket for Log
     if (input[0] == Self::MASTER) && let Ok(log) = MASTER_LOG.lock()
     {
       // Our log is a vector of strings, so we seperate each member by a newline
-      stream.try_write(log.join("\n").as_bytes()).into_trace(Error::Socket).or_warn();
+      stream.try_write(log.join("\n").as_bytes()).into_trace(Error::SocketIoWrite).or_warn();
     }
     else {
       fail!(stream, 0x0f);
@@ -184,17 +183,16 @@ impl Socket for Power
       fail!(stream, 0xbb);
     }
 
-    let _ = {
-      match (input[0])
-      {
-        Self::SHUTDOWN => poweroff(Mode::Shutdown).or_warn(),
-        Self::REBOOT => poweroff(Mode::Reboot).or_warn(),
-        Self::FORCE_SHUTDOWN => forcePoweroff(Mode::Shutdown).or_warn(),
-        Self::FORCE_REBOOT => forcePoweroff(Mode::Reboot).or_warn(),
-        // Write error byte to socket- unexpected input
-        _ => { fail!(stream, 0x0f); }
-      }
-    };
+    match (input[0])
+    {
+      Self::SHUTDOWN => poweroff(Mode::Shutdown),
+      Self::REBOOT => poweroff(Mode::Reboot),
+      Self::FORCE_SHUTDOWN => forcePoweroff(Mode::Shutdown),
+      Self::FORCE_REBOOT => forcePoweroff(Mode::Reboot),
+      // Write error byte to socket- unexpected input
+      _ => { fail!(stream, 0x0f); }
+    }
+      .or_warn();
   }
 }
 

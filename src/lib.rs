@@ -14,16 +14,7 @@ pub mod console;
 pub mod state;
 pub mod socket;
 
-use std::{fmt::Display, num::ParseIntError, ops::Deref};
-
-#[derive(Eq, PartialEq, Copy, Clone, Debug, Default)]
-pub enum Release
-{
-  Stable,
-  Testing,
-  #[default]
-  Unstable
-}
+use std::{fmt::Display, iter::Iterator, ops::Deref};
 
 /*
  * This alias makes things alot less repetative, e.g.:
@@ -36,13 +27,30 @@ pub enum Release
  */
 pub type Data = Vec<u8>;
 
+/*
+ * A delimited vector iterator, which will iterate over each inner item with the delimiter
+ * appended, except for the last item
+ */
+#[derive(Clone)]
+pub struct DelimVecIter<T: Display>
+{
+  delim: char,
+  // Where we are in the vector, make sure we don't go past its index max
+  current: usize,
+  vec: Vec<T>
+}
+
 pub const RELEASE: Release = Release::Unstable;
 // Where the important files for kickit live
 pub const PREFIX: &str = "/usr/lib/kickit";
 
 display_enum!
 {
-  Release
+  #[derive(Eq, PartialEq, Copy, Clone, Debug, Default)]
+  pub enum Release
+  {
+    Stable, Testing, #[default] Unstable
+  }
 }
 
 // Convert a Vector that may be empty to an Option
@@ -51,59 +59,26 @@ pub trait OptionEmptyVec: Sized
   fn empty_none(self) -> Option<Self>;
 }
 
-/**
-  * # Errors
-  *
-  * - Couldn't convert input substring (radix) to a byte because it isn't valid hex
-  */
-/*
- * Convert a string of hex to a vector of bytes, for example:
- *
- * ```
- *   // This should never panic
- *   assert_eq!(hex_data("48656c6c6f").unwrap().as_slice(), "Hello".as_bytes());
- *
- *   // ...and neither should this
- *   assert_eq!(*hex_data("377abcaf271c").unwrap(), [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]);
- * ```
- */
-#[inline] pub fn hex_data<Stringify: Display>(hexRaw: Stringify) -> Result<Data, ParseIntError>
+#[must_use]
+pub fn PRETTY_VERSION() -> String
 {
-  // Open a string on our hex data so we can get a slice of chars from it
-  let hex = hexRaw.to_string();
-  // The data vector will be increased for each hex
-  let mut data = Data::with_capacity(hex.len() / 2);
+  [
+    // Display version as a string
+    env!("CARGO_PKG_VERSION").to_owned(),
 
-  /*
-   * Convert from a String to a vector of characters & then
-   * split that into character chunks of 2
-   */
-  for single in (hex.chars().collect::<Vec<char>>().chunks(2))
-  {
-    // Collect the 2 characters as a String
-    data.push(u8::from_str_radix(&single.iter().collect::<String>() as &str, 16)?);
-  }
-
-  Ok(data)
+    if (crate::RELEASE == crate::Release::Stable)
+    {
+      // Nothing needs to be added here
+      String::new()
+    }
+    else {
+      // Add the current release at the end if unstable
+      format!(" ({})", crate::RELEASE)
+    }
+  ]
+    // And join both of those together without a seperator
+    .join("")
 }
-
-pub const PRETTY_VERSION: fn() -> String = ||
-[
-  // Display version as a string
-  env!("CARGO_PKG_VERSION").to_owned(),
-
-  if (crate::RELEASE == crate::Release::Stable)
-  {
-    // Nothing needs to be added here
-    String::new()
-  }
-  else {
-    // Add the current release at the end if unstable
-    format!(" ({})", crate::RELEASE)
-  }
-]
-  // And join both of those together without a seperator
-  .join("");
 
 impl<T, S: Deref<Target = Vec<T>>> OptionEmptyVec for S
 {
@@ -116,6 +91,40 @@ impl<T, S: Deref<Target = Vec<T>>> OptionEmptyVec for S
     else {
       Some(self)
     }
+  }
+}
+
+impl<T: Display> Iterator for DelimVecIter<T>
+{
+  type Item = String;
+
+  fn next(&mut self) -> Option<String>
+  {
+    let reply =
+    {
+      match (self.current)
+      {
+        // This is the last item in the vector, so don't append the delimiter
+        end if (end == self.vec.len() - 1) => Some(self.vec[self.current].to_string()),
+        // Reached the end of the vector
+        overflow if (overflow >= self.vec.len()) => None,
+        // This is a regular item, append the delimiter
+        _ => Some(format!("{}{}", self.vec[self.current], self.delim))
+      }
+    };
+
+    // Move onto the next
+    self.current += 1;
+    reply
+  }
+}
+
+impl<T: Display> DelimVecIter<T>
+{
+  #[must_use]
+  pub const fn new(vec: Vec<T>, delim: char) -> Self
+  {
+    Self { delim, current: 0, vec }
   }
 }
 
@@ -136,6 +145,38 @@ macro_rules! binary
         .display()
         .to_string()
     }
+  };
+}
+/*
+ * Create a wrapped value - a struct with a single-object tuple, that can
+ * be dereferenced to the object
+ */
+#[macro_export(local_inner_macros)]
+macro_rules! wrap
+{
+  {
+    $(impl $(<$($gen: ident: $($dep: ident),*),*>)? Deref<Target = $inner: ty> for $name: ident;)+
+  } =>
+  {
+    $(
+      impl $(<$($gen: $($dep),+),+>)? std::ops::Deref for $name $(<$($gen),+>)?
+      {
+        type Target = $inner;
+        // The compiler will automatically handle proper dereferencing after this
+        fn deref(&self) -> &$inner
+        {
+          &self.0
+        }
+      }
+      // and then we implement derefencing as mutable too!
+      impl $(<$($gen: $($dep),+),+>)? std::ops::DerefMut for $name $(<$($gen),+>)?
+      {
+        fn deref_mut(&mut self) -> &mut $inner
+        {
+          &mut self.0
+        }
+      }
+    )+
   };
 }
 // Implement std::fmt::Display for enumeration in a nicely formatted way
@@ -165,16 +206,14 @@ macro_rules! display_enum
    *   }
    * ```
    */
-  { $($what: ty { $($variant: pat => $fmt: expr),* }),* } =>
+  { $($name: ty { $($variant: ident => $fmt: expr),* }),* } =>
   {
-    $(impl std::fmt::Display for $what
+    $(impl std::fmt::Display for $name
     {
       fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
       {
-        // Access all variants of the enum
-        use $what::*;
         // Add each variant & their corresponding display text
-        write!(f, "{}", match (self) { $($variant => $fmt,)* })
+        write!(f, "{}", match (self) { $(Self::$variant => $fmt,)* })
       }
     })*
   };
@@ -184,30 +223,49 @@ macro_rules! display_enum
    * ```
    *   use crate::display_enum;
    *
-   *   #[derive(Debug)] enum Mood { Happy, Sad, Angry }
-   *
    *   // Each variant will be displayed as their name
-   *   display_enum! { Mood }
+   *   display_enum!
+   *   {
+   *     #[derive(Thoughts, Behavior)]
+   *     pub enum Feeling
+   *     {
+   *       Happy,
+   *       Sad,
+   *       Angry
+   *     }
+   *   }
    *
    *   fn main()
    *   {
-   *     eprintln!("Today I am feeling {}", Mood::Happy);
+   *     // output: "Today I am feeling Happy"
+   *     eprintln!("Today I am feeling {}", Feeling::Happy);
    *   }
    * ```
    */
-  { $($what: ty),* } =>
+  { $(#[$ea: meta])? $vis: vis enum $name: ident { $($(#[$va: meta])? $var: ident),* } } =>
   {
-    $(impl std::fmt::Display for $what
+    $(#[$ea])?
+    $vis enum $name
     {
-      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error>
+      $(
+        $(#[$va])?
+        $var
+      ),*
+    }
+
+    impl std::fmt::Display for $name
+    {
+      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
       {
-        /*
-         * Use the pretty-debug implementation for enum's as a display because
-         * the debug (:?) method provides the variant's name
-         */
-        write!(f, "{self:?}")
+        write!(f, "{}", match (self)
+        {
+          $(
+            // Convert the variant token provided directly in the macro to a string
+            Self::$var => stringify!($var)
+          ),*
+        })
       }
-    })*
+    }
   };
   /*
    * Display a variant as its representing value, for example:
@@ -215,7 +273,13 @@ macro_rules! display_enum
    * ```
    *   use crate::display_enum;
    *
-   *   #[derive(Debug)] enum Member { Ray = 130, Chloe = 622, Jayden = 905 }
+   *   #[derive(Debug)]
+   *   enum Member
+   *   {
+   *     Ray = 130,
+   *     Chloe = 622,
+   *     Jayden = 905
+   *   }
    *
    *   // Each variant will be displayed as their ID
    *   display_enum! { Member as u128 }
@@ -227,9 +291,9 @@ macro_rules! display_enum
    *   }
    * ```
    */
-  { $(what: ty as $repr: ty),* } =>
+  { $(name: ty as $repr: ty),* } =>
   {
-    $(impl std::fmt::Display for $what
+    $(impl std::fmt::Display for $name
     {
       fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error>
       {
@@ -281,13 +345,13 @@ macro_rules! path
  *   }
  * ```
  */
-#[macro_export]
+#[macro_export(local_inner_macros)]
 macro_rules! file_path
 {
   ($parent: expr, $file: expr, $ext: expr) =>
   {
     {
-      $crate::path!($parent, $file).with_extension($ext)
+      path!($parent, $file).with_extension($ext)
     }
   };
 }
@@ -311,7 +375,17 @@ macro_rules! file_path
 #[macro_export]
 macro_rules! oncelock
 {
-  { let $oncelock: path = $val: expr } =>
+  {
+    $(
+      $vis: vis static $name: ident: $ty: ty;
+    )+
+  } =>
+  {
+    $(
+      $vis static $name: std::sync::OnceLock<$ty> = std::sync::OnceLock::new();
+    )+
+  };
+  { $oncelock: ident = $val: expr } =>
   {
     /*
      * Check OnceLock doesn't already have a value- it shouldn't because
@@ -328,6 +402,14 @@ macro_rules! oncelock
     else {
       Ok(())
     }
+  };
+  (&$oncelock: ident .unwrap_or($fallback: expr)) =>
+  {
+    $oncelock.get_or_init(|| { $fallback })
+  };
+  (&mut $oncelock: ident ?? $fallback: expr) =>
+  {
+    $oncelock.get_mut_or_init(|| { $fallback })
   };
   (&mut $oncelock: expr) =>
   {

@@ -43,14 +43,14 @@ trait RunOperation
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 #[must_use]
-enum Operation<'name>
+enum Operation
 {
   Help(Option<String>),
   Version,
   ServiceList(Option<Vec<String>>),
   ServiceRestart(String),
   State,
-  Log(&'name str, bool, bool),
+  Log(String, bool, bool),
   InitLog,
   TargetInfo,
   Shutdown(bool),
@@ -60,16 +60,10 @@ enum Operation<'name>
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 enum Usage
 {
-  #[doc = include_str!("../../docs/ktctl_usage/main.txt")]
   #[default]
   Main,
-
-  #[doc = include_str!("../../docs/ktctl_usage/log.txt")]
   Log,
-
-  #[doc = include_str!("../../docs/ktctl_usage/service.txt")]
   Service,
-
   Taskitty
 }
 
@@ -87,7 +81,7 @@ display_enum!
         " help                     Show this help prompt",
         " version                  Show kickit version",
         " service [S]              List all services or selected services",
-        " log [S]                  Read a service's logs",
+        " log (--init) <S>         Read a service's logs",
         " state                    Show current init state",
         " target                   Show current loaded target",
         " shutdown [--force]       Shutdown this device (force not recommended!)",
@@ -111,7 +105,7 @@ display_enum!
       )
     },
     Service => format!("Usage: {}{} service{} [NAMEs..]", binary!(), Colour::BOLD, Colour::RESET),
-    // her name is taskitty ^.^
+    // ^.^
     Taskitty => include_str!("../../assets/taskitty.txt").to_string()
   }
 }
@@ -211,7 +205,7 @@ impl Init
   }
 }
 
-impl Operation<'_>
+impl Operation
 {
   #[inline]
   fn help(self) -> Result<()>
@@ -292,7 +286,7 @@ impl Operation<'_>
   }
 }
 
-impl RunOperation for Operation<'_>
+impl RunOperation for Operation
 {
   fn root(&self) -> bool
   {
@@ -326,7 +320,7 @@ impl RunOperation for Operation<'_>
       ServiceRestart(..) => { todo!(); } , /*serviceRestart(services),*/
       Log(name, ugly, ignoreInit) =>
       {
-        let service: Service = name.into();
+        let service: Service = name.as_str().into();
         service.readLog(ugly, ignoreInit)
       },
       InitLog => Init::readLog().await,
@@ -339,17 +333,16 @@ impl RunOperation for Operation<'_>
 }
 
 // Handle user arguments, including the operation & targets for it
-fn parseArgs(arguments: &[String]) -> Result<Operation<'_>>
+fn parseArgs(mut arguments: Vec<String>) -> Result<Operation>
 {
-  use Operation::{Help, Version, TargetInfo, State, ServiceList, ServiceRestart,
-                    InitLog, Log, Shutdown, Reboot};
+  use Operation::{Help, Version, TargetInfo, State, ServiceList,
+                    ServiceRestart, InitLog, Log, Shutdown, Reboot};
 
   match (&arguments[0] as &str)
   {
     "shutdown" | "poweroff" => return Ok(Shutdown(false)),
     "reboot" => return Ok(Reboot(false)),
-    _ =>
-    {
+    _ => {
       if (arguments.len() == 1)
       {
         return Ok(Help(None))
@@ -372,7 +365,7 @@ fn parseArgs(arguments: &[String]) -> Result<Operation<'_>>
       }
       else {
         // Help prompt about a specific operation
-        Help(Some(arguments[2].clone()))
+        Help(Some(arguments.remove(2)))
       }
     },
     "service" =>
@@ -389,7 +382,7 @@ fn parseArgs(arguments: &[String]) -> Result<Operation<'_>>
     {
       if (arguments.len() == 3)
       {
-        ServiceRestart(arguments[2].clone())
+        ServiceRestart(arguments.remove(2))
       }
       else {
         Err(Error::MissingArgument.trace("service-restart"))?
@@ -426,13 +419,13 @@ fn parseArgs(arguments: &[String]) -> Result<Operation<'_>>
             {
               if (!argument.starts_with("--"))
               {
-                break Ok(argument)
+                break Ok(argument.clone())
               }
             },
             // Cycled through all possible arguments without a matching name
             None => break Err(Error::MissingArgument.trace("log"))
           }
-        }? as &str
+        }?
       };
       Log(serviceName, ugly, ignoreInit)
     },
@@ -447,7 +440,7 @@ fn parseArgs(arguments: &[String]) -> Result<Operation<'_>>
       Reboot(force)
     },
     // Unknown operation
-    _ => Err(Error::InvalidOperation.trace(&arguments[1]))?
+    _ => Err(Error::InvalidOperation.trace(arguments.remove(1)))?
   })
 }
 
@@ -458,7 +451,7 @@ async fn main()
 
   // Extract operation from our arguments or throw error
   let args = env::args().collect::<Vec<String>>();
-  let operation = parseArgs(&args).handle();
+  let operation = parseArgs(args).handle();
 
   operation.run().await.handle();
 }

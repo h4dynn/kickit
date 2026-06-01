@@ -52,27 +52,39 @@ pub enum Error
   #[error("File or directory not found")] FileNotFound,
   #[error("Failed to setup work directory")] RunFsFail,
   #[error("Kernel command-line parameter not found")] Cmdline,
+  #[error("Failed to get the current system time")] Time,
   // When data can't be represented as a UTF-8 string
   #[error("Failed to format content in UTF-8")] Format,
   // Target-related errors (see how they are used in `src/target.rs`)
+  #[error("Target not found, has it been created in the library folder?")] TargetNotFound,
   #[error("A required value is missing in target configuration")] TargetMissingValue,
   #[error("Failed to parse target configuration file")] TargetParse,
   // Socket data input/output failure
-  #[error("Failed to read from a socket")] Socket,
+  #[error("Failed to start up a socket")] SocketStartup,
+  #[error("Socket read connection failure")] SocketIoRead,
+  #[error("Socket write connection failure")] SocketIoWrite,
+  #[error("Input/output connections failed on socket")] SocketIo,
   // Service-related errors (used in `src/service.rs`)
   #[error("Failed to parse service configuration file")] ServiceParse,
   #[error("Failed to access a service")] ServiceAccess,
   #[error("Failed to start a service")] ServiceUp,
   #[error("Failed to stop a service")] ServiceDown,
   #[error("Failed to start logger for a service")] ServiceLog,
+  #[error("Failed to read from the service's logger")] ServiceLogContent,
+  #[error("Failed to compress/decompress the service's logger")] ServiceLogCompress,
   #[error("Service was killed or stopped")] ServiceNotRunning,
   #[error("Service became a zombie")] ServiceZombified,
+  #[error("Invalid sandboxing option specified")] ServiceSandboxBadOpt,
+  #[error("Failed to initialise sandbox directory")] ServiceSandboxInit,
   #[error("Failed to access a logfile")] AccessLog,
   // Mount-related failures
+  #[error("Invalid formatted line in fstab")] FstabParse,
   #[error("Failed to mount a critical filesystem")] SysFsMount,
   #[error("Failed to unmount a filesystem")] SysFsUnmount,
   // Pure init errors
-  #[error("Failed to shutdown the init system")] Shutdown
+  #[error("Failed to shutdown the init system")] Shutdown,
+  #[error("Failed to read from the proc filesystem")] ProcFs,
+  #[error("A critical error occurred while trying to power down the system")] PowerCritical
 }
 
 // This stores an error (in kind) and an error trace/"context" (in trace)
