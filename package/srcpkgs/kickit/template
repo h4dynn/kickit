@@ -15,7 +15,7 @@ do_fetch()
 
 do_build()
 {
-  cargo build --release --target x86_64-linux-unknown-musl
+  cargo build --release --target x86_64-unknown-linux-musl
 }
 
 do_install()

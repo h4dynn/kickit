@@ -28,8 +28,8 @@ jobs:
           # workaround for "/run/self/uid_map: Operation not permitted"
           sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
           cd package
-          # Install the x86_64-linux-unknown-musl target which we are building with
-          rustup target add x86_64-linux-unknown-musl
+          # Install the musl target which we are building with
+          rustup target add x86_64-unknown-linux-musl
           ./xbps-src pkg kickit
 
       - name: Create release (pre-release)
