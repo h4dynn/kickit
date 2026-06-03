@@ -59,6 +59,12 @@ pub trait OptionEmptyVec: Sized
   fn empty_none(self) -> Option<Self>;
 }
 
+// This is just a nice way to do nothing with a value
+pub trait TrashUnused: Sized
+{
+  fn trash(self) {}
+}
+
 #[must_use]
 pub fn version() -> String
 {
@@ -127,6 +133,8 @@ impl<T: Display> DelimVecIter<T>
     Self { delim, current: 0, vec }
   }
 }
+
+impl<S: Sized> TrashUnused for S {}
 
 // Get the name of the current binary (e.g. ktctl)
 #[macro_export]

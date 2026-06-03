@@ -39,14 +39,8 @@ pub fn forcePoweroff(mode: Mode) -> Result<Infallible>
 {
   use nix::sys::reboot::reboot;
 
-  if (*oncelock!(&NO_INIT)?)
-  {
-    Err(Error::Shutdown.trace("Force shutdown is not supported when kickit is not ran as the init process!"))
-  }
-  else {
-    // Skip any other important poweroff stuff (like killing services)
-    reboot(mode.into()).into_trace(Error::PowerCritical)
-  }
+  // Skip any other important poweroff stuff (like killing services)
+  reboot(mode.into()).into_trace(Error::PowerCritical)
 }
 
 /**
@@ -139,6 +133,8 @@ pub fn poweroff(mode: Mode) -> Result<Infallible>
   {
     // Just kill kickit & nothing else, since we are not the init system
     status!("Stopping kickit now");
+    // Remove any leftovers from this init session
+    fs::remove_dir_all(PathBuf::from("/run/kickit")).into_trace(Error::Shutdown)?;
     process::exit(0);
   }
   else {

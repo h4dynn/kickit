@@ -57,7 +57,7 @@ macro_rules! fail
   {
     {
       // Write our "error byte" to signal to peer an error has occurred
-      $stream.try_write(&[$error as u8]).into_trace(Error::SocketIoWrite).or_warn();
+      $stream.try_write(&[PeerError::IS_ERROR, $error as u8]).into_trace(Error::SocketIoWrite).or_warn();
       // Exit our function- do nothing more here
       return
     }
@@ -181,7 +181,7 @@ impl Socket for Power
 
   async fn handler(&self, stream: &mut UnixStream)
   {
-    use crate::init::power::{poweroff, forcePoweroff, Mode};
+    use crate::{oncelock, console::ReturnError, TrashUnused, init::{NO_INIT, power::{poweroff, forcePoweroff, Mode}}};
 
     stream_sanity!(stream => Readable + Writable);
     // Read 1 byte only
@@ -194,14 +194,33 @@ impl Socket for Power
 
     match (input[0])
     {
-      Self::SHUTDOWN => poweroff(Mode::Shutdown),
-      Self::REBOOT => poweroff(Mode::Reboot),
-      Self::FORCE_SHUTDOWN => forcePoweroff(Mode::Shutdown),
-      Self::FORCE_REBOOT => forcePoweroff(Mode::Reboot),
+      Self::SHUTDOWN => poweroff(Mode::Shutdown).or_warn().trash(),
+      Self::REBOOT => poweroff(Mode::Reboot).or_warn().trash(),
+      Self::FORCE_SHUTDOWN =>
+      {
+        if (oncelock!(&NO_INIT) == Ok(&false))
+        {
+          forcePoweroff(Mode::Shutdown).or_warn();
+        }
+        else {
+          Error::Shutdown.trace("Force shutdown is not supported when kickit is not ran as the init process!").warn();
+          fail!(stream, PeerError::BadInput);
+        }
+      }
+      Self::FORCE_REBOOT =>
+      {
+        if (oncelock!(&NO_INIT) == Ok(&false))
+        {
+          forcePoweroff(Mode::Reboot).or_warn();
+        }
+        else {
+          Error::Shutdown.trace("Force reboot is not supported when kickit is not ran as the init process!").warn();
+          fail!(stream, PeerError::BadInput);
+        }
+      },
       // Write error byte to socket- unexpected input
       _ => fail!(stream, PeerError::BadInput)
     }
-      .or_warn();
   }
 }
 

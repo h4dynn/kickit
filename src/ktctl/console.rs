@@ -21,7 +21,8 @@ pub enum Error
   #[error("Failed to access log file from service")] LogAccessFail,
   #[error("Failed to parse init work data")] RunFsParseFail,
   #[error("Failed to access a socket")] SocketAccessFail,
-  #[error("Socket gave invalid response")] SocketResponse
+  #[error("Socket gave invalid response")] SocketResponse,
+  #[error("Error when sending request to socket")] Socket
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]

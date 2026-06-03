@@ -120,17 +120,20 @@ impl Power
 
 impl PeerError
 {
+  // Marker that this reply from socket is infact an error
+  pub const IS_ERROR: u8 = 0xee;
+
   // Inspect a u8 for a matching byte and turn it into a result
   /**
     * # Errors
     *
     * * Input byte was matched to a `PeerError` variant
     */
-  pub const fn errorize(test: u8) -> Result<u8, Self>
+  pub const fn errorize(test: [u8; 2]) -> Result<[u8; 2], Self>
   {
     macro_rules! errorize
     {
-      ($test: path => $($variant: ident),*) =>
+      ($test: expr => $($variant: ident),*) =>
       {
         $(
           if ($test == Self::$variant as u8)
@@ -141,8 +144,12 @@ impl PeerError
       }
     }
 
-    // If we match this byte to an error, return the matching error
-    errorize!(test => Unknown, Internal, NotReadReady, NotWriteReady, IoRead, IoWrite, BadInput);
+    // uh-oh!
+    if (test[0] == Self::IS_ERROR)
+    {
+      // If we match this byte to an error, return the matching error
+      errorize!(test[1] => Unknown, Internal, NotReadReady, NotWriteReady, IoRead, IoWrite, BadInput);
+    }
     // No error byte was found!
     Ok(test)
   }

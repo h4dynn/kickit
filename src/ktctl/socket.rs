@@ -7,7 +7,7 @@ impl From<PeerError> for ErrorTrace
 {
   fn from(input: PeerError) -> Self
   {
-    Error::SocketAccessFail.trace(input)
+    Error::Socket.trace(input)
   }
 }
 
@@ -36,11 +36,11 @@ pub trait Request: Socket + Sized + Send + Sync
       io.readable().await.into_trace(Error::SocketAccessFail)?;
       io.read_to_end(&mut out).await.into_trace(Error::SocketAccessFail).context("io.Core")?;
 
-      // If we have an error then only one byte will be provided
-      if (out.len() == 1)
+      // If we have an error then 2 bytes will be provided (marker + type)
+      if (out.len() == 2 && out[0] == PeerError::IS_ERROR)
       {
         // Make sure this singular byte isn't an error
-        PeerError::errorize(out[0]).map(|ok| vec![ok]).map_err(ErrorTrace::from)
+        PeerError::errorize([out[0], out[1]]).map(|ok| ok.to_vec()).map_err(ErrorTrace::from)
       }
       else {
         // We're all good!
