@@ -8,8 +8,8 @@ use tokio::task;
 use nix::unistd::getuid;
 use kickit::{
   console::Colour, console::{ReturnError, HandleError},
-  init::{console::{Error, ErrorResult, Result, StdResult, status, stall},
-            service::Service, TARGET, TARGET_NAME, QUIET}, oncelock};
+  init::{console::{Error, ErrorResult, Result, StdResult, status, stall, QUIET},
+            service::Service, target::{TARGET, TARGET_NAME}, NO_INIT}, oncelock};
 
 trait StartService
 {
@@ -95,7 +95,7 @@ impl StartService for Service
   * - if not ran as the init process (pid 1)
  **/
 #[inline]
-fn sanity(sideInit: bool) -> StdResult<(), Error>
+fn sanity() -> StdResult<(), Error>
 {
   use kickit::{console::affirm, init::console::warn};
 
@@ -105,7 +105,7 @@ fn sanity(sideInit: bool) -> StdResult<(), Error>
   // Make sure we are running as the root user
   affirm!(getuid().is_root(), Error::NotRoot);
 
-  if (!sideInit)
+  if (!*oncelock!(&NO_INIT)?)
   {
     if (cfg!(feature = "bypass_init_check"))
     {
@@ -254,15 +254,13 @@ async fn main()
   let profiler = dhat::Profiler::new_heap();
 
   let sysArgs: Vec<String> = args().collect();
-  // Run alongside another init e.g. openrc or runit
-  let noInit = sysArgs.len() > 1 && &sysArgs[1] == "--no-init";
+  oncelock! { NO_INIT = sysArgs.len() > 1 && &sysArgs[1] == "--no-init" }.handle();
 
-  sanity(noInit).handle();
+  sanity().handle();
+  status!("kickit {}", kickit::version());
 
   // Respect the quiet argument if provided
-  oncelock! { QUIET = cmdlineParam("quiet") == Ok(None) && !noInit }.handle();
-
-  status!("kickit {}", kickit::PRETTY_VERSION());
+  oncelock! { QUIET = cmdlineParam("quiet") == Ok(None) && !*oncelock!(&NO_INIT).handle() }.handle();
 
   let targetName = if (cfg!(debug_assertions))
   {
@@ -296,7 +294,7 @@ async fn main()
   let services = initServices(&target.services).handle();
 
   // If we are running alongside another init these things should've already been done
-  if (!noInit)
+  if (!*oncelock!(&NO_INIT).handle())
   {
     status!("Mounting system filesystems");
     mountSysFilesystems().handle();
@@ -315,9 +313,9 @@ async fn main()
   // Open our sockets
   socks!(socket::Core, socket::Log, socket::Power);
 
-  // Startup our services & wait for it to finish
   for service in (services)
   {
+    // Spawn the service's process, start its supervisor & log watcher
     service.start().await.handle();
   }
 

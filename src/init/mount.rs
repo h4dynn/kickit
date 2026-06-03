@@ -254,7 +254,7 @@ pub fn mounted(mountpoint: impl AsRef<Path> + Display) -> Result<bool>
   */
 pub fn mountFstabEntries() -> Result<()>
 {
-  use crate::{path, init::console::status};
+  use crate::{path, continueif, init::console::status};
   use std::{fs::File, path::PathBuf, io::{BufReader, BufRead}};
 
   /*
@@ -291,10 +291,7 @@ pub fn mountFstabEntries() -> Result<()>
     let stringEntry = maybeEntry.into_trace(Error::Unknown)?;
 
     // Ignore comments...
-    if (stringEntry.starts_with('#'))
-    {
-      continue;
-    }
+    continueif! (stringEntry.starts_with('#'));
 
     // Split up by spaces, so we can parse each entry's information
     let entry: Vec<&str> = stringEntry.split_ascii_whitespace().collect();

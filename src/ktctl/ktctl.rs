@@ -26,7 +26,7 @@ trait RunOperation
     if (self.root())
     {
       // Make sure we are root user
-      affirm!(getuid().is_root(), Error::BadPerms.trace(""));
+      affirm!(getuid().is_root(), Error::OperationNotPermitted.trace(""));
     }
 
     if (self.initOnly())
@@ -243,15 +243,15 @@ impl Operation
   #[inline]
   fn version()
   {
-    println!("{b}{}{r}\n\n{b}ktctl:{r} {}", kickit::ktctl::LOGO, kickit::PRETTY_VERSION(),
-                                            b = Colour::BOLD, r = Colour::RESET);
+    use kickit::{ktctl::LOGO, version};
+
+    println!("{b}{}{r}\n{b}ktctl:{r} {}", LOGO, version(), b = Colour::BOLD, r = Colour::RESET);
   }
 
   async fn targetInfo() -> Result<()>
   {
     // Read target name from the socket, and format as a String
-    eprint!("{}", String::from_utf8(Core.request(Core::TARGET).await?)
-                      .into_trace(Error::Format).context("target")?);
+    eprint!("{}", String::from_utf8(Core.request(Core::TARGET).await?).into_trace(Error::Format).context("target")?);
     Ok(())
   }
 
@@ -259,29 +259,34 @@ impl Operation
   {
     use std::thread::park;
 
-    let _ = {
-      // Request to the power socket
-      if (reboot)
+    // The corresponding byte we will send to the socket
+    let ask = match (reboot)
+    {
+      true if (force) => Power::FORCE_REBOOT,
+      false if (force) => Power::FORCE_SHUTDOWN,
+      true => Power::REBOOT,
+      false => Power::SHUTDOWN
+    };
+
+    let noInit =
+    {
+      let response = Core.request(Core::NO_INIT).await?[0];
+      match (response)
       {
-        if (force)
-        {
-          Power.request(Power::FORCE_REBOOT).await
-        }
-        else {
-          Power.request(Power::REBOOT).await
-        }
-      }
-      else if (force)
-      {
-        Power.request(Power::FORCE_SHUTDOWN).await
-      }
-      else {
-        Power.request(Power::SHUTDOWN).await
+        0 => Ok(false), 1 => Ok(true),
+        // This really should never happen but is still a possibility
+        _ => Err(Error::SocketResponse.trace(format!("Expected a boolean, got {response}")))
       }
     }?;
-    // Block until shutdown
-    park();
-    // Should never reach this point but the compiler complains without it
+    // Send power signal
+    let _ = Power.request(ask).await?;
+
+    if (!noInit)
+    {
+      // Block until shutdown
+      park();
+    }
+    // Should only reach this point if kickit wasn't the init process
     Ok(())
   }
 }
@@ -317,7 +322,7 @@ impl RunOperation for Operation
         Ok(())
       },
       ServiceList(services) => serviceList(services.as_deref()),
-      ServiceRestart(..) => { todo!(); } , /*serviceRestart(services),*/
+      ServiceRestart(..) => todo!(), /*serviceRestart(services),*/
       Log(name, ugly, ignoreInit) =>
       {
         let service: Service = name.as_str().into();
@@ -335,6 +340,7 @@ impl RunOperation for Operation
 // Handle user arguments, including the operation & targets for it
 fn parseArgs(mut arguments: Vec<String>) -> Result<Operation>
 {
+  use kickit::breakif;
   use Operation::{Help, Version, TargetInfo, State, ServiceList,
                     ServiceRestart, InitLog, Log, Shutdown, Reboot};
 
@@ -415,13 +421,7 @@ fn parseArgs(mut arguments: Vec<String>) -> Result<Operation>
           match (argIter.next())
           {
             // Check for argument with a valid potential name
-            Some(argument) =>
-            {
-              if (!argument.starts_with("--"))
-              {
-                break Ok(argument.clone())
-              }
-            },
+            Some(argument) => breakif! (!argument.starts_with("--") => Ok(argument.clone())),
             // Cycled through all possible arguments without a matching name
             None => break Err(Error::MissingArgument.trace("log"))
           }
@@ -429,16 +429,8 @@ fn parseArgs(mut arguments: Vec<String>) -> Result<Operation>
       };
       Log(serviceName, ugly, ignoreInit)
     },
-    "shutdown" =>
-    {
-      let force = arguments.iter().any(|arg| arg == "--force");
-      Shutdown(force)
-    },
-    "reboot" =>
-    {
-      let force = arguments.iter().any(|arg| arg == "--force");
-      Reboot(force)
-    },
+    "shutdown" => Shutdown(arguments.iter().any(|arg| arg == "--force")),
+    "reboot" => Reboot(arguments.iter().any(|arg| arg == "--force")),
     // Unknown operation
     _ => Err(Error::InvalidOperation.trace(arguments.remove(1)))?
   })

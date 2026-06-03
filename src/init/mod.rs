@@ -16,13 +16,8 @@ use crate::{oncelock, console::ExtendWithContext};
 use self::console::{Error, Result};
 
 oncelock! {
-  // Once the target is sourced its configuration will be stored here
-  pub static TARGET: self::target::Target;
-  pub static TARGET_NAME: String;
-  // If set to true, master log entries won't be shown on console
-  pub static QUIET: bool;
-  // Tells the service watcher to not care if a service is killed, set by `poweroff(_, _)`
-  pub static POWER_OFF: bool;
+  // True when `--no-init` arg is provided to kickit, safeguard to limit kickit's behaviour
+  pub static NO_INIT: bool;
 }
 
 // Some distros such as Alpine will use more lightweight shells, such as ash
@@ -38,7 +33,7 @@ pub(crate) const SHELL: &str = "/bin/bash";
   *
   * - /proc/cmdline couldn't be accessed for whatever reason,
   * - Specified command-line param wasn't found
- **/
+  */
 // Get a command-line parameter using the /proc/cmdline file
 #[inline]
 pub fn cmdlineParam(param: &str) -> Result<Option<String>>

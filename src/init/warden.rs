@@ -163,13 +163,12 @@ fn usage()
   eprintln!();
   eprintln!("Flags:");
   eprintln!(" -h, --help               Show this help prompt & exit");
-  eprintln!(" -l, --list               List all share & new flags & exit");
+  eprintln!(" -l, --list               List all flags & exit");
   eprintln!(" -b, --bind-file PATH     Bind mount a file to the container");
   eprintln!(" -B, --bind-dir PATH      Bind mount a directory & its file to the container");
   eprintln!(" -d, --dbus               Link the dbus socket to the container");
   eprintln!(" -S, --mount-system-fs    Mount system pseudo filesystems");
-  eprintln!(" -s, --share FLAG         Share the current namespace with child");
-  eprintln!(" -n, --new FLAG           Create a new seperate namespace for child");
+  eprintln!(" -f, --share FLAG         Namespace unsharing flags");
   eprintln!();
   process::exit(0);
 }
@@ -191,12 +190,12 @@ fn listFlags()
     };
   }
 
-  eprintln!("{}Flags (share):{}", Colour::BOLD, Colour::RESET);
-  eprintln_each!(DelimVecIter::<&str>::new(NsFlag::SHARE_FLAGS.to_vec(), ','));
-  eprintln!();
+  eprintln!("{}Flags:{}", Colour::BOLD, Colour::RESET);
 
-  eprintln!("{}Flags (new):{}", Colour::BOLD, Colour::RESET);
-  eprintln_each!(DelimVecIter::<&str>::new(NsFlag::NEW_FLAGS.to_vec(), ','));
+  eprintln_each!(DelimVecIter::<String>::new(NsFlag::SHARE_FLAGS.to_vec().iter()
+                        .map(|f| format!("share_{f}")).collect(), ','));
+  eprintln_each!(DelimVecIter::<String>::new(NsFlag::NEW_FLAGS.to_vec().iter()
+                        .map(|f| format!("new_{f}")).collect(), ','));
 
   process::exit(0);
 }
@@ -397,7 +396,7 @@ fn main()
     { $lock: ident = $val: expr } =>
     {
       {
-        let _ = $lock.set($val).map_err(|_| { fatal!("Failed to set an argument's value!") });
+        let _ = $lock.set($val).map_err(|_| fatal!("Failed to set an argument's value!"));
       }
     };
   }
@@ -418,17 +417,10 @@ fn main()
       "-B" | "--bind-dir" => bindDirs.push(PathBuf::from(next!(argIter))),
       "-S" | "--mount-system-fs" => set! { MOUNT_SYSTEM_FS = true },
       "-d" | "--dbus" => set! { LINK_DBUS = true },
-      "-s" | "--share" =>
+      "-f" | "--flag" =>
       {
-        let next = &next!(argIter);
-        let flag = NsFlag::new(format!("share_{next}")).ok_or(Error(format!("Unknown share flag provided: {next}"))).handle();
-        flags.push(flag);
-      },
-      "-n" | "--new" =>
-      {
-        let next = &next!(argIter);
-        let flag = NsFlag::new(format!("new_{next}")).ok_or(Error(format!("Unknown new flag provided: {next}"))).handle();
-        flags.push(flag);
+        let next = next!(argIter);
+        flags.push(NsFlag::new(&next).ok_or(Error(format!("Invalid flag: {next}"))).handle());
       },
       newRoot => { root = Some(newRoot.to_owned()); break; }
     }
@@ -439,7 +431,7 @@ fn main()
   {
     Some(root) =>
     {
-      let Some(exec) = argIter.next() else { fatal!("Provide an executable!") };
+      let exec = argIter.next().ok_or(Error("Provide an executable!")).handle();
 
       // Its okay to not provide any arguments with collect
       let args: Vec<String> = argIter.collect();

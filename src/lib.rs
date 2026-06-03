@@ -60,7 +60,7 @@ pub trait OptionEmptyVec: Sized
 }
 
 #[must_use]
-pub fn PRETTY_VERSION() -> String
+pub fn version() -> String
 {
   [
     // Display version as a string
@@ -433,5 +433,32 @@ macro_rules! oncelock
   };
 }
 
+#[macro_export]
+macro_rules! continueif
+{
+  ($eval: expr) =>
+  {
+    if ($eval)
+    {
+      continue;
+    }
+  };
+}
+
+#[macro_export]
+macro_rules! breakif
+{
+  ($eval: expr $(=> $ret: expr)?) =>
+  {
+    {
+      if ($eval)
+      {
+        break $($ret)?;
+      }
+    }
+  };
+}
+
 // Detect this at compile-time to avoid headaches
-#[cfg(not(target_os = "linux"))] compile_error!("unsupported platform; only Linux is supported");
+#[cfg(not(target_os = "linux"))]
+compile_error!("unsupported platform; only Linux is supported");

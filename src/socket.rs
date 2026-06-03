@@ -5,6 +5,34 @@
 
 use std::path::PathBuf;
 use tokio::net::UnixStream;
+use thiserror::Error;
+
+// Error bytes send to the peer on the other end of the socket
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Error, Default)]
+pub enum PeerError
+{
+  #[default]
+  #[error("An unknown input/output error occurred on socket")]
+  Unknown = 0xaa,
+  // Fallback error type for exceptionally rare errors
+  #[error("init experienced an internal error while preparing response")]
+  Internal = 0x0f,
+  // Wanted to read a request from peer but not ready
+  #[error("Socket's stream is not readable")]
+  NotReadReady = 0x3f,
+  // Wanted to write a response to peer but not ready
+  #[error("Socket's stream is not writable")]
+  NotWriteReady = 0xe6,
+  // Failed to read request from peer
+  #[error("Failed to read peer's request on socket")]
+  IoRead = 0xbb,
+  // Failed to write response to peer
+  #[error("Failed to write response to peer")]
+  IoWrite = 0xcc,
+  // Peer wrote bad input to the socket
+  #[error("Invalid input request provided")]
+  BadInput = 0xdc
+}
 
 // Provides init state, version, target & PID
 #[derive(PartialEq, Eq, Copy, Clone, Default, Debug)]
@@ -59,7 +87,7 @@ pub trait Socket: Send + 'static
    * because the compiler suggests to use it so others can use
    * auto-traits like Send if needed (lint: `async_fn_in_trait`)
    */
-  fn handler(&'static self, stream: UnixStream) -> impl Future<Output = ()> + Send;
+  fn handler(&'static self, stream: &mut UnixStream) -> impl Future<Output = ()> + Send;
 }
 
 /*
@@ -73,6 +101,7 @@ impl Core
   pub const VERSION: u8 = 0xc4;
   pub const TARGET: u8 = 0xa0;
   pub const PID: u8 = 0xf1;
+  pub const NO_INIT: u8 = 0xda;
 }
 
 impl Log
@@ -87,4 +116,34 @@ impl Power
   pub const REBOOT: u8 = 0xd7;
   pub const FORCE_SHUTDOWN: u8 = 0xfd;
   pub const FORCE_REBOOT: u8 = 0xe3;
+}
+
+impl PeerError
+{
+  // Inspect a u8 for a matching byte and turn it into a result
+  /**
+    * # Errors
+    *
+    * * Input byte was matched to a `PeerError` variant
+    */
+  pub const fn errorize(test: u8) -> Result<u8, Self>
+  {
+    macro_rules! errorize
+    {
+      ($test: path => $($variant: ident),*) =>
+      {
+        $(
+          if ($test == Self::$variant as u8)
+          {
+            return Err(Self::$variant)
+          }
+        )*
+      }
+    }
+
+    // If we match this byte to an error, return the matching error
+    errorize!(test => Unknown, Internal, NotReadReady, NotWriteReady, IoRead, IoWrite, BadInput);
+    // No error byte was found!
+    Ok(test)
+  }
 }

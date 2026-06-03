@@ -1,7 +1,15 @@
 //! I/O with init sockets
 
-use crate::{Data, socket::Socket, console::ExtendWithContext};
-use super::console::{Error, Result, ConvError};
+use crate::{Data, socket::{Socket, PeerError}, console::ExtendWithContext};
+use super::console::{Error, ErrorTrace, Result, ConvError};
+
+impl From<PeerError> for ErrorTrace
+{
+  fn from(input: PeerError) -> Self
+  {
+    Error::SocketAccessFail.trace(input)
+  }
+}
 
 pub trait Request: Socket + Sized + Send + Sync
 {
@@ -28,12 +36,14 @@ pub trait Request: Socket + Sized + Send + Sync
       io.readable().await.into_trace(Error::SocketAccessFail)?;
       io.read_to_end(&mut out).await.into_trace(Error::SocketAccessFail).context("io.Core")?;
 
-      // An 0x0f byte means the operation failed
-      if (out.as_slice() == [0x0f])
+      // If we have an error then only one byte will be provided
+      if (out.len() == 1)
       {
-        Err(Error::SocketAccessFail.trace(format!("Socket error after requesting {}", Self::NAME)))
+        // Make sure this singular byte isn't an error
+        PeerError::errorize(out[0]).map(|ok| vec![ok]).map_err(ErrorTrace::from)
       }
       else {
+        // We're all good!
         Ok(out)
       }
     }

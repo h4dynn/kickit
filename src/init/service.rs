@@ -167,7 +167,7 @@ impl Service
   pub async fn up(&mut self) -> Result<()>
   {
     use nix::unistd::{chown, Uid, Gid};
-    use super::TARGET;
+    use super::target::TARGET;
     use tokio::time::timeout;
     use std::{fs::{File, Permissions}, path::PathBuf, io::{Write, BufRead, BufReader, pipe},
                   os::unix::fs::PermissionsExt, time::Duration};
@@ -334,7 +334,7 @@ impl Service
     */
   pub fn supervise(name: &str, mut process: Child) -> Result<()>
   {
-    use super::POWER_OFF;
+    use super::power::POWER_OFF_READY;
 
     /*
      * Make sure if we receive an error, but the init system has been told to
@@ -345,9 +345,9 @@ impl Service
     {
       ($error: expr) =>
       {
-        if let Some(powerOff) = POWER_OFF.get() && (*powerOff)
+        if (oncelock!(&POWER_OFF_READY) == Ok(&true))
         {
-          // Don't want to trigger an error if we are powering off - this is expected behavoir
+          // Don't want to trigger an error if we are powering off - this is expected behavior
           Ok(())
         }
         else {
@@ -483,18 +483,8 @@ impl SandboxOptions
 
     for flag in (&self.flags)
     {
-      // Flag arg can be either 'new' or 'share', so for NsFlag::NewMount it would be 'new_mount'
-      let (flagArg, flagName) = flag.split_once('_').ok_or(Error::ServiceSandboxBadOpt.trace(flag))?;
-
-      match (flagArg)
-      {
-        "share" => args.push(String::from("--share")),
-        "new" => args.push(String::from("--new")),
-        _ => return Err(Error::ServiceSandboxBadOpt.trace(format!("Expected either share/new type flag, got '{flagArg}'")))
-      }
-
-      // Cut off the flag arg part, as we have turned it into its relative argument
-      args.push(flagName.to_owned());
+      args.push(String::from("--flag"));
+      args.push(flag.to_owned());
     }
 
     for bind in (&self.import)
@@ -557,6 +547,7 @@ impl Logger
     */
   pub fn watch(&mut self) -> Result<()>
   {
+    use crate::breakif;
     use std::{thread::sleep, time::Duration, io::{Read, BufReader}};
 
     loop {
@@ -590,10 +581,7 @@ impl Logger
           let byte = maybeByte.into_trace(Error::ServiceLogContent).context(&self.name)?;
 
           // This is our EOF- we know to stop reading bytes here
-          if (byte == b'\n')
-          {
-            break
-          }
+          breakif! (byte == b'\n');
 
           log.push(byte as char);
         }

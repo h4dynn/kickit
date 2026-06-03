@@ -1,9 +1,8 @@
 pkgname=kickit
-version=0.1.1
+version=0.1.2
 revision=1
-hostmakedepends="cargo git"
+makedepends="rustup git"
 short_desc="A robust & simple init system"
-build_style=cargo
 maintainer="h4dynn <h4dynn@github.com>"
 license="GPL-3.0-or-later"
 homepage="https://github.com/h4dynn/kickit"
@@ -15,12 +14,12 @@ do_fetch()
 
 pre_build()
 {
-  # This probably won't be installed by default
-  rustup target add x86_64-unknown-linux-musl
+  rustup-init -y -t x86_64-unknown-linux-musl
 }
 
 do_build()
 {
+  . ~/.cargo/env
   cargo build --release --target x86_64-unknown-linux-musl
 }
 
@@ -30,8 +29,8 @@ do_install()
                   "$DESTDIR/usr/lib/kickit/service" \
                   "$DESTDIR/usr/lib/kickit/target"
 
-  install -vm0755 ./target/release/kickit "$DESTDIR/usr/lib/kickit/kickit"
-  install -vm0755 ./target/release/ktctl "$DESTDIR/usr/bin/ktctl"
+  install -vm0755 ./target/x86_64-unknown-linux-musl/release/kickit "$DESTDIR/usr/lib/kickit/kickit"
+  install -vm0755 ./target/x86_64-unknown-linux-musl/release/ktctl "$DESTDIR/usr/bin/ktctl"
   install -vm0755 ./src/service-helpers/agetty.sh "$DESTDIR/usr/lib/kickit/agetty.sh"
   install -vm0755 ./src/service-helpers/udev.sh "$DESTDIR/usr/lib/kickit/udev.sh"
 

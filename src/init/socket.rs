@@ -1,7 +1,7 @@
 //! Socket implementations for init
 
 use tokio::net::UnixStream;
-use crate::{socket::{Socket, Core, Log, Power}, init::console::{Result, Error, ErrorResult},
+use crate::{socket::{Socket, PeerError, Core, Log, Power}, init::console::{Result, Error, ErrorResult},
               console::{HandleError, ExtendWithContext}};
 
 /*
@@ -16,7 +16,7 @@ pub trait Open: Socket + Sync + 'static
     async move
     {
       use std::{os::unix::fs::PermissionsExt, fs::{Permissions, set_permissions}};
-      use tokio::net::UnixSocket;
+      use tokio::{task, net::UnixSocket};
 
       let mode = if (Self::PRIVATE) { 0o600 } else { 0o666 };
       let permissions = Permissions::from_mode(mode);
@@ -31,14 +31,16 @@ pub trait Open: Socket + Sync + 'static
        */
       set_permissions(self.path(), permissions).into_trace(Error::ServiceAccess).context(self.path().display())?;
 
-      // Set max listeners at a time to 1
+      // Set max listeners at a time (backlog)
       let listener = sock.listen(Self::MAX_LISTENERS).into_trace(Error::SocketIo)?;
 
-      while let Ok((stream, _)) = listener.accept().await
-      {
-        self.handler(stream).await;
+      // Loop forever, handling each incoming connection
+      loop {
+        // Start accepting incoming connections
+        let (mut socket, _) = listener.accept().await.map_err(|_| Error::SocketStartup.trace("Failed to start listener"))?;
+
+        task::spawn(async move { self.handler(&mut socket).await; });
       }
-      Ok(())
     }
   }
 }
@@ -51,12 +53,14 @@ pub trait Open: Socket + Sync + 'static
 #[macro_export]
 macro_rules! fail
 {
-  ($stream: expr, $byte: tt) =>
+  ($stream: expr, $error: path) =>
   {
-    // Write our "error byte" to signal to peer an error has occurred
-    $stream.try_write(&[$byte]).into_trace(Error::SocketIoWrite).or_warn();
-    // Exit our function- do nothing more here
-    return
+    {
+      // Write our "error byte" to signal to peer an error has occurred
+      $stream.try_write(&[$error as u8]).into_trace(Error::SocketIoWrite).or_warn();
+      // Exit our function- do nothing more here
+      return
+    }
   };
 }
 pub use crate::fail as fail;
@@ -68,14 +72,14 @@ macro_rules! stream_sanity
   {
     if ($stream.readable().await.is_err())
     {
-      fail!($stream, 0x3f);
+      fail!($stream, PeerError::NotReadReady);
     }
   };
   ($stream: expr => Writable) =>
   {
     if ($stream.writable().await.is_err())
     {
-      fail!($stream, 0xe6);
+      fail!($stream, PeerError::NotWriteReady);
     }
   };
   ($stream: expr => Readable + Writable) =>
@@ -91,11 +95,10 @@ impl Socket for Core
   const NAME: &str = "Core";
   // All users should be able to access this socket as it reports no private data
   const PRIVATE: bool = false;
-  const MAX_LISTENERS: u32 = 3;
 
-  async fn handler(&self, stream: UnixStream)
+  async fn handler(&self, stream: &mut UnixStream)
   {
-    use crate::{state::state, init::TARGET_NAME};
+    use crate::{oncelock, state::state, init::{NO_INIT, target::TARGET_NAME}};
     use std::process;
 
     stream_sanity!(stream => Readable + Writable);
@@ -105,34 +108,40 @@ impl Socket for Core
 
     if (stream.try_read(&mut input).is_err())
     {
-      fail!(stream, 0xbb);
+      fail!(stream, PeerError::IoRead);
     }
 
     match (input[0])
     {
-      Self::STATE =>
-      {
-        stream.try_write(&[state!() as u8])
-      },
+      Self::STATE => stream.try_write(&[state!() as u8]),
       // Add a newline byte, this is our EOL
       Self::VERSION => stream.try_write(&[env!("CARGO_PKG_VERSION").as_bytes(), b"\n"].concat()),
       Self::TARGET =>
       {
-        // Try open the OnceLock here
-        if let Some(targetName) = TARGET_NAME.get()
+        if let Ok(targetName) = oncelock!(&TARGET_NAME)
         {
           stream.try_write(&[targetName.as_bytes(), b"\n"].concat())
         }
         else {
           // Error if target name cannot be reached for whatever reason
-          fail!(stream, 0x0f);
+          fail!(stream, PeerError::Internal);
         }
       },
       Self::PID => stream.try_write(&process::id().to_le_bytes()),
+      Self::NO_INIT =>
+      {
+        if let Ok(noInit) = oncelock!(&NO_INIT)
+        {
+          stream.try_write(&[(*noInit).into()])
+        }
+        else {
+          fail!(stream, PeerError::Internal);
+        }
+      },
       // Safely ignore newlines
       b'\n' => Ok(0),
       // Send an error for unknown bytes
-      _ => { fail!(stream, 0x0f); }
+      _ => fail!(stream, PeerError::BadInput)
     }
       .into_trace(Error::SocketIoWrite).or_warn();
   }
@@ -142,7 +151,7 @@ impl Socket for Log
 {
   const NAME: &str = "Log";
 
-  async fn handler(&self, stream: UnixStream)
+  async fn handler(&self, stream: &mut UnixStream)
   {
     use crate::init::console::MASTER_LOG;
 
@@ -151,7 +160,7 @@ impl Socket for Log
 
     if (stream.try_read(&mut input).is_err())
     {
-      fail!(stream, 0xbb);
+      fail!(stream, PeerError::IoRead);
     }
 
     // If we receive the corresponding byte & the master log is lockable
@@ -161,7 +170,7 @@ impl Socket for Log
       stream.try_write(log.join("\n").as_bytes()).into_trace(Error::SocketIoWrite).or_warn();
     }
     else {
-      fail!(stream, 0x0f);
+      fail!(stream, PeerError::Internal);
     }
   }
 }
@@ -170,7 +179,7 @@ impl Socket for Power
 {
   const NAME: &str = "Power";
 
-  async fn handler(&self, stream: UnixStream)
+  async fn handler(&self, stream: &mut UnixStream)
   {
     use crate::init::power::{poweroff, forcePoweroff, Mode};
 
@@ -180,7 +189,7 @@ impl Socket for Power
 
     if (stream.try_read(&mut input).is_err())
     {
-      fail!(stream, 0xbb);
+      fail!(stream, PeerError::IoRead);
     }
 
     match (input[0])
@@ -190,7 +199,7 @@ impl Socket for Power
       Self::FORCE_SHUTDOWN => forcePoweroff(Mode::Shutdown),
       Self::FORCE_REBOOT => forcePoweroff(Mode::Reboot),
       // Write error byte to socket- unexpected input
-      _ => { fail!(stream, 0x0f); }
+      _ => fail!(stream, PeerError::BadInput)
     }
       .or_warn();
   }

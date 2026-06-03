@@ -1,8 +1,13 @@
 //! power.rs - Shutdown & reboot safely
 
-use std::ffi::OsString;
-use super::console::{Error, ErrorResult, Result};
+use std::{convert::Infallible, ffi::OsString};
+use super::{NO_INIT, oncelock, console::{Error, ErrorResult, Result}};
 use nix::sys::reboot::RebootMode;
+
+oncelock! {
+  // Tells the service watcher to not care if a service is killed, set by `poweroff(_, _)`
+  pub static POWER_OFF_READY: bool;
+}
 
 pub enum Mode
 {
@@ -30,15 +35,20 @@ impl Into<RebootMode> for Mode
   *
   * * Failed to power-off/reboot with `nix::sys::reboot::reboot`
   */
-pub fn forcePoweroff(mode: Mode) -> Result<()>
+pub fn forcePoweroff(mode: Mode) -> Result<Infallible>
 {
   use nix::sys::reboot::reboot;
 
-  reboot(mode.into()).into_trace(Error::PowerCritical)?;
-  Ok(())
+  if (*oncelock!(&NO_INIT)?)
+  {
+    Err(Error::Shutdown.trace("Force shutdown is not supported when kickit is not ran as the init process!"))
+  }
+  else {
+    // Skip any other important poweroff stuff (like killing services)
+    reboot(mode.into()).into_trace(Error::PowerCritical)
+  }
 }
 
-// Using `Result<!>` is experimental sadly
 /**
   * # Errors
   *
@@ -48,13 +58,14 @@ pub fn forcePoweroff(mode: Mode) -> Result<()>
   * * Failed to kill a service
   * * Failed to reboot with `nix::sys::reboot::reboot`
   */
-pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
+pub fn poweroff(mode: Mode) -> Result<Infallible>
 {
-  use crate::{path, console::{Colour, HandleError, ReturnError}, oncelock};
-  use super::{POWER_OFF, mount::{unmount, unmountFlags, UnmountFlag::Lazy}, console::{status, warn}};
+  use crate::{path, continueif, console::{Colour, HandleError, ReturnError}};
+  use super::{mount::{unmount, unmountFlags, UnmountFlag::Lazy}, console::{status, warn}};
   use nix::{unistd::Pid, sys::{reboot::reboot, signal::{kill, Signal}}};
-  use std::{fs, path::PathBuf};
+  use std::{fs, path::PathBuf, process};
 
+  let noInit = *oncelock!(&NO_INIT)?;
   let pidsAndNames: Vec<(u32, OsString)> =
   {
     let mut inner = Vec::new();
@@ -66,10 +77,7 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
       let pidPath = path!("/run/kickit/service", &name, "pid");
 
       // Test if this is a RunOnce service & if so we don't need to do anything here
-      if (path!("/run/kickit/service", &name, "exited").is_file())
-      {
-        continue
-      }
+      continueif! (path!("/run/kickit/service", &name, "exited").is_file());
 
       // Read the little-endian ordered PID u32 bytes
       let pid = u32::from_le_bytes(fs::read(pidPath).into_trace(Error::RunFsFail)?
@@ -81,10 +89,9 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
 
     inner
   };
-  let mounts = fs::read_to_string("/proc/mounts").into_trace(Error::ProcFs)?;
 
   // This makes sure that when we kill the services, the service manager doesn't throw an error
-  oncelock! { POWER_OFF = true }?;
+  oncelock! { POWER_OFF_READY = true }?;
 
   for (pid, name) in (pidsAndNames)
   {
@@ -99,11 +106,14 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
     }
   }
 
-  for mountInfoString in (mounts.lines())
+  for mountInfoString in (fs::read_to_string("/proc/mounts").into_trace(Error::ProcFs)?.lines())
   {
-    // Split for each space found
-    let info: Vec<&str> = mountInfoString.split_ascii_whitespace().collect();
-    let mountpoint = info[1];
+    // Split for each space found & get the 2nd element (1st in this case since indices starts at 0)
+    let mountpoint = mountInfoString.split_ascii_whitespace().nth(1)
+                        .ok_or(Error::ProcFs.trace("Missing mountpoint specifier in /proc/mounts"))?;
+
+    // Do not touch any other mountpoints outside of kickit's scope if we are not the init process
+    continueif! (noInit && !mountpoint.starts_with("/run/kickit/"));
 
     match (mountpoint)
     {
@@ -125,8 +135,14 @@ pub fn poweroff(mode: Mode) -> Result<()> //Result<!>
     }
   }
 
-  // Poweroff/reboot!!!!
-  reboot(mode.into()).into_trace(Error::PowerCritical)?;
-  // Should never reach this point
-  Ok(())
+  if (noInit)
+  {
+    // Just kill kickit & nothing else, since we are not the init system
+    status!("Stopping kickit now");
+    process::exit(0);
+  }
+  else {
+    // Poweroff/reboot!!!!
+    reboot(mode.into()).into_trace(Error::PowerCritical)
+  }
 }

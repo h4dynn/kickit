@@ -1,6 +1,13 @@
 //! Target configuration file sourcing
 
-use crate::{init::console::Result, path, file_path};
+use crate::{oncelock, init::console::Result, path, file_path};
+
+oncelock! {
+  // Once the target is sourced its configuration will be stored here
+  pub static TARGET: Target;
+  // Used to tell ktctl which target is active (in Core socket)
+  pub static TARGET_NAME: String;
+}
 
 // KTTargetSource is used for toml::from_str
 #[derive(serde::Deserialize, PartialEq, Eq, Clone, Debug)]

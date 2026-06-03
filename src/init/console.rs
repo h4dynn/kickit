@@ -2,11 +2,16 @@
 
 use std::{sync::Mutex, fmt::Display, io};
 use thiserror::Error;
-use crate::{console::{Colour, ReturnError, ExtendWithContext}, state::InitState, display_enum};
+use crate::{oncelock, console::{Colour, ReturnError, ExtendWithContext}, state::InitState, display_enum};
 
 pub enum Marker
 {
   Status, Warn, Fatal, Service
+}
+
+oncelock! {
+  // If set to true, master log entries won't be shown on console
+  pub static QUIET: bool;
 }
 
 display_enum!
@@ -316,7 +321,7 @@ macro_rules! log
   ($new: expr) =>
   {
     {
-      use $crate::init::{console::MASTER_LOG, QUIET};
+      use $crate::init::console::{MASTER_LOG, QUIET};
 
       // Get the oncelock or fallback to false if not already set
       let quiet = QUIET.get().unwrap_or(&false);

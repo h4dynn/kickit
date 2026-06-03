@@ -8,7 +8,7 @@ use crate::{binary, console::{Colour, ReturnError, ExtendWithContext}};
 #[must_use]
 pub enum Error
 {
-  #[error("Permission denied: Root is required for this operation")] BadPerms,
+  #[error("Operation not permitted")] OperationNotPermitted,
   #[error("Too much arguments provided for operation")] TooManyArgs,
   #[error("Missing argument for operation")] MissingArgument,
   #[error("Unrecognised operation provided")] InvalidOperation,
@@ -20,7 +20,8 @@ pub enum Error
   #[error("Invalid file encoding (expected UTF-8)")] Format,
   #[error("Failed to access log file from service")] LogAccessFail,
   #[error("Failed to parse init work data")] RunFsParseFail,
-  #[error("Failed to access a socket")] SocketAccessFail
+  #[error("Failed to access a socket")] SocketAccessFail,
+  #[error("Socket gave invalid response")] SocketResponse
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
