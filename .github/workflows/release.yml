@@ -23,7 +23,7 @@ jobs:
           curl -#Lo- http://repo-default.voidlinux.org/static/xbps-static-latest.x86_64-musl.tar.xz | unxz | tar -xC ~/.xbps
 
       - name: Build kickit (unstable)
-        if: ${{ startsWith(github.event.head_commit.message, 'release') }}
+        if: ${{ !startsWith(github.event.head_commit.message, 'release') }}
         run: |
           export PATH=$HOME/.xbps/usr/bin:$PATH
           # workaround for "/run/self/uid_map: Operation not permitted"
