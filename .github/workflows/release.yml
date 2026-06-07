@@ -29,8 +29,8 @@ jobs:
           # workaround for "/run/self/uid_map: Operation not permitted"
           sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
           cd package
-          rm -rf kickit
-          mv unstable kickit
+          rm -rf srcpkgs/kickit
+          mv srcpkgs/unstable srcpkgs/kickit
           ./xbps-src pkg kickit
 
       - name: Build kickit (stable)
