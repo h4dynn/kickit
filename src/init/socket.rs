@@ -1,7 +1,7 @@
 //! Socket implementations for init
 
 use tokio::net::UnixStream;
-use crate::{socket::{Socket, PeerError, Core, Log, Power}, init::console::{Result, Error, ErrorResult},
+use crate::{socket::{Socket, PeerError, Core, Log, Power}, console::{ErrorResult, ReturnError}, init::console::{Result, Error},
               console::{HandleError, ExtendWithContext}};
 
 /*
@@ -45,15 +45,23 @@ pub trait Open: Socket + Sync + 'static
   }
 }
 
-/*
- * Provide a failure byte to the socket peer as a signal that something
- * went wrong (this byte is usually 0x0f), shutdown the connection &
- * then return
- */
-#[macro_export]
-macro_rules! fail
+#[macro_export(local_inner_macros)]
+macro_rules! socket_relay
 {
-  ($stream: expr, $error: path) =>
+  // Provide the OK byte as well as our bytes
+  ($stream: expr, Ok($ok: expr)) =>
+  {
+    {
+      socket_relay!(@write $stream, &[PeerError::IS_OK]);
+      socket_relay!(@write $stream, $ok);
+    }
+  };
+  /*
+   * Provide a failure byte to the socket peer as a signal that something
+   * went wrong, shutdown the connection & then return, see `socket::PeerError`
+   * for all possible errors
+   */
+  ($stream: expr, Err($error: path)) =>
   {
     {
       // Write our "error byte" to signal to peer an error has occurred
@@ -62,8 +70,16 @@ macro_rules! fail
       return
     }
   };
+  (@write $stream: expr, $bytes: expr) =>
+  {
+    if let Err(err) = $stream.try_write($bytes).into_trace(Error::SocketIoWrite)
+    {
+      err.warn();
+      socket_relay!($stream, Err(PeerError::IoWrite))
+    }
+  };
 }
-pub use crate::fail as fail;
+pub use crate::socket_relay as relay;
 
 #[macro_export]
 macro_rules! stream_sanity
@@ -72,14 +88,14 @@ macro_rules! stream_sanity
   {
     if ($stream.readable().await.is_err())
     {
-      fail!($stream, PeerError::NotReadReady);
+      relay!($stream, Err(PeerError::NotReadReady));
     }
   };
   ($stream: expr => Writable) =>
   {
     if ($stream.writable().await.is_err())
     {
-      fail!($stream, PeerError::NotWriteReady);
+      relay!($stream, Err(PeerError::NotWriteReady));
     }
   };
   ($stream: expr => Readable + Writable) =>
@@ -98,8 +114,7 @@ impl Socket for Core
 
   async fn handler(&self, stream: &mut UnixStream)
   {
-    use crate::{oncelock, state::state, init::{NO_INIT, target::TARGET_NAME}};
-    use std::process;
+    use crate::{state::state, init::{PID, target::TARGET}};
 
     stream_sanity!(stream => Readable + Writable);
 
@@ -108,42 +123,41 @@ impl Socket for Core
 
     if (stream.try_read(&mut input).is_err())
     {
-      fail!(stream, PeerError::IoRead);
+      relay!(stream, Err(PeerError::IoRead));
     }
 
     match (input[0])
     {
-      Self::STATE => stream.try_write(&[state!() as u8]),
+      Self::STATE => relay!(stream, Ok(&[state!() as u8])),
       // Add a newline byte, this is our EOL
-      Self::VERSION => stream.try_write(&[env!("CARGO_PKG_VERSION").as_bytes(), b"\n"].concat()),
+      Self::VERSION => relay!(stream, Ok(&[env!("CARGO_PKG_VERSION").as_bytes(), b"\n"].concat())),
       Self::TARGET =>
       {
-        if let Ok(targetName) = oncelock!(&TARGET_NAME)
+        if let Some(target) = TARGET.get()
         {
-          stream.try_write(&[targetName.as_bytes(), b"\n"].concat())
+          relay!(stream, Ok(&[target.name.as_bytes(), b"\n"].concat()));
         }
         else {
           // Error if target name cannot be reached for whatever reason
-          fail!(stream, PeerError::Internal);
+          relay!(stream, Err(PeerError::Internal));
         }
       },
-      Self::PID => stream.try_write(&process::id().to_le_bytes()),
-      Self::NO_INIT =>
+      Self::PID =>
       {
-        if let Ok(noInit) = oncelock!(&NO_INIT)
+        if let Some(pid) = PID.get()
         {
-          stream.try_write(&[(*noInit).into()])
+          relay!(stream, Ok(&pid.unwrap_or(1).to_le_bytes()));
         }
         else {
-          fail!(stream, PeerError::Internal);
+          // This will only happen if the PID is uninitialized which it shouldn't ever be
+          relay!(stream, Err(PeerError::Internal));
         }
       },
       // Safely ignore newlines
-      b'\n' => Ok(0),
+      b'\n' => (),
       // Send an error for unknown bytes
-      _ => fail!(stream, PeerError::BadInput)
+      _ => relay!(stream, Err(PeerError::BadInput))
     }
-      .into_trace(Error::SocketIoWrite).or_warn();
   }
 }
 
@@ -160,17 +174,17 @@ impl Socket for Log
 
     if (stream.try_read(&mut input).is_err())
     {
-      fail!(stream, PeerError::IoRead);
+      relay!(stream, Err(PeerError::IoRead));
     }
 
     // If we receive the corresponding byte & the master log is lockable
     if (input[0] == Self::MASTER) && let Ok(log) = MASTER_LOG.lock()
     {
       // Our log is a vector of strings, so we seperate each member by a newline
-      stream.try_write(log.join("\n").as_bytes()).into_trace(Error::SocketIoWrite).or_warn();
+      relay!(stream, Ok(log.join("\n").as_bytes()));
     }
     else {
-      fail!(stream, PeerError::Internal);
+      relay!(stream, Err(PeerError::Internal));
     }
   }
 }
@@ -181,7 +195,7 @@ impl Socket for Power
 
   async fn handler(&self, stream: &mut UnixStream)
   {
-    use crate::{oncelock, console::ReturnError, TrashUnused, init::{NO_INIT, power::{poweroff, forcePoweroff, Mode}}};
+    use crate::{console::ReturnError, TrashUnused, init::{PID, power::{poweroff, forcePoweroff, Mode}}};
 
     stream_sanity!(stream => Readable + Writable);
     // Read 1 byte only
@@ -189,7 +203,7 @@ impl Socket for Power
 
     if (stream.try_read(&mut input).is_err())
     {
-      fail!(stream, PeerError::IoRead);
+      relay!(stream, Err(PeerError::IoRead));
     }
 
     match (input[0])
@@ -198,28 +212,28 @@ impl Socket for Power
       Self::REBOOT => poweroff(Mode::Reboot).or_warn().trash(),
       Self::FORCE_SHUTDOWN =>
       {
-        if (oncelock!(&NO_INIT) == Ok(&false))
+        if let Some(pid) = PID.get() && (pid.is_none())
         {
           forcePoweroff(Mode::Shutdown).or_warn();
         }
         else {
           Error::Shutdown.trace("Force shutdown is not supported when kickit is not ran as the init process!").warn();
-          fail!(stream, PeerError::BadInput);
+          relay!(stream, Err(PeerError::Unsupported));
         }
       }
       Self::FORCE_REBOOT =>
       {
-        if (oncelock!(&NO_INIT) == Ok(&false))
+        if let Some(pid) = PID.get() && (pid.is_none())
         {
           forcePoweroff(Mode::Reboot).or_warn();
         }
         else {
           Error::Shutdown.trace("Force reboot is not supported when kickit is not ran as the init process!").warn();
-          fail!(stream, PeerError::BadInput);
+          relay!(stream, Err(PeerError::Unsupported));
         }
       },
       // Write error byte to socket- unexpected input
-      _ => fail!(stream, PeerError::BadInput)
+      _ => relay!(stream, Err(PeerError::BadInput))
     }
   }
 }

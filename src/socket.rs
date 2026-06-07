@@ -1,13 +1,13 @@
 /*!
  * ABI for kickit sockets
- * Keep in mind this isn't the complete implementation, see `init::socket` and `ktctl::socket`
+ * For socket behavior implementations, see `init::socket`, for generic requests see `ktctl::socket`
  */
 
-use std::path::PathBuf;
+use std::{io, path::PathBuf};
 use tokio::net::UnixStream;
 use thiserror::Error;
 
-// Error bytes send to the peer on the other end of the socket
+// Error bytes sent to the peer on the other end of the socket
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Error, Default)]
 pub enum PeerError
 {
@@ -29,6 +29,9 @@ pub enum PeerError
   // Failed to write response to peer
   #[error("Failed to write response to peer")]
   IoWrite = 0xcc,
+  // Certain configurations will forbid some operations (e.g. no init = no force shutdown)
+  #[error("This operation is unsupported in the current environment")]
+  Unsupported = 0xa0,
   // Peer wrote bad input to the socket
   #[error("Invalid input request provided")]
   BadInput = 0xdc
@@ -60,17 +63,12 @@ pub trait Socket: Send + 'static
   // You may implement a custom method for a different path
   fn path(&self) -> PathBuf
   {
-    use crate::file_path;
+    use crate::{tern, file_path};
 
     // These are the default paths, used except for when a custom method is defined
-    if (Self::PRIVATE)
-    {
-      // This folder is root access only (0o600)
-      file_path!(PathBuf::from("/run/kickit/private"), "io", Self::NAME)
-    }
-    else {
-      // Can be accessed by anybody (0o666)
-      file_path!(PathBuf::from("/run/kickit"), "io", Self::NAME)
+    tern! {
+      Self::PRIVATE => file_path!(PathBuf::from("/run/kickit/private"), "io", Self::NAME),
+      else => file_path!(PathBuf::from("/run/kickit"), "io", Self::NAME)
     }
   }
 
@@ -101,7 +99,6 @@ impl Core
   pub const VERSION: u8 = 0xc4;
   pub const TARGET: u8 = 0xa0;
   pub const PID: u8 = 0xf1;
-  pub const NO_INIT: u8 = 0xda;
 }
 
 impl Log
@@ -120,37 +117,34 @@ impl Power
 
 impl PeerError
 {
+  pub const IS_OK: u8 = 0xaf;
   // Marker that this reply from socket is infact an error
   pub const IS_ERROR: u8 = 0xee;
 
-  // Inspect a u8 for a matching byte and turn it into a result
+  // Resolve error variant from its matching byte
   /**
     * # Errors
     *
     * * Input byte was matched to a `PeerError` variant
     */
-  pub const fn errorize(test: [u8; 2]) -> Result<[u8; 2], Self>
+  pub fn errorize(input: u8) -> io::Result<Self>
   {
     macro_rules! errorize
     {
-      ($test: expr => $($variant: ident),*) =>
+      ($test: expr => $($variant: ident)|*) =>
       {
         $(
           if ($test == Self::$variant as u8)
           {
-            return Err(Self::$variant)
+            return Ok(Self::$variant)
           }
         )*
       }
     }
 
-    // uh-oh!
-    if (test[0] == Self::IS_ERROR)
-    {
-      // If we match this byte to an error, return the matching error
-      errorize!(test[1] => Unknown, Internal, NotReadReady, NotWriteReady, IoRead, IoWrite, BadInput);
-    }
-    // No error byte was found!
-    Ok(test)
+    // If we match this byte to an error, return the matching error
+    errorize!(input => Unknown | Internal | NotReadReady | NotWriteReady | IoRead | IoWrite | Unsupported | BadInput);
+    // No error byte was found..
+    Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Couldn't match {input} to any valid error variant")))
   }
 }

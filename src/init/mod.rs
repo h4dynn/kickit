@@ -16,8 +16,8 @@ use crate::{oncelock, console::ExtendWithContext};
 use self::console::{Error, Result};
 
 oncelock! {
-  // True when `--no-init` arg is provided to kickit, safeguard to limit kickit's behaviour
-  pub static NO_INIT: bool;
+  // Some when `--no-init` arg is provided to kickit, safeguard to limit kickit's behaviour
+  pub static PID: Option<u32>;
 }
 
 // Some distros such as Alpine will use more lightweight shells, such as ash
@@ -39,7 +39,7 @@ pub(crate) const SHELL: &str = "/bin/bash";
 pub fn cmdlineParam(param: &str) -> Result<Option<String>>
 {
   use std::{fs, path::PathBuf};
-  use crate::init::console::ErrorResult;
+  use crate::console::ErrorResult;
 
   // Read the cmdline from procfs
   let cmdline = fs::read_to_string(PathBuf::from("/proc/cmdline"))

@@ -7,7 +7,7 @@ extern crate nix;
 
 use kickit::{wrap, oncelock, console::{Colour, ReturnError, HandleError}};
 use nix::sched::CloneFlags as NixFlag;
-use std::{fmt::Display, path::{Path, PathBuf}, io, process};
+use std::{fmt::Display, path::PathBuf, io, process};
 
 // A standard type, for anything that can be displayed
 pub struct Error<Inner: Display>(Inner);
@@ -119,7 +119,7 @@ macro_rules! warn
   {
     {
       use Colour::{ORANGE, BOLD, RESET};
-      eprintln!("warden {}(error): {}{}{}", ORANGE, BOLD, format!($($frag)*), RESET);
+      eprintln!("warden {}(warning): {}{}{}", ORANGE, BOLD, format!($($frag)*), RESET);
     }
   };
 }
@@ -156,9 +156,14 @@ impl<OkType, ErrorType: Display> StandardizeError<OkType, ErrorType> for Result<
   }
 }
 
+trait SandboxCommand<'inner>
+{
+  fn sandbox(&'inner mut self, root: PathBuf, bind: BindMounts, flags: NsFlags) -> Command<'inner>;
+}
+
 fn usage()
 {
-  eprintln!("Usage: {}warden{} <FLAGS> <ROOT> <PROGRAM> [-- ARGUMENTs..]", Colour::BOLD, Colour::RESET);
+  eprintln!("Usage: {}warden{} <FLAGS> <ROOT> <PROGRAM> [ARGUMENTs..]", Colour::BOLD, Colour::RESET);
   eprintln!("A service sandboxer, unshares namespaces and chroots");
   eprintln!();
   eprintln!("Flags:");
@@ -200,13 +205,16 @@ fn listFlags()
   process::exit(0);
 }
 
-impl<'inner> Command<'inner>
+impl<'inner> SandboxCommand<'inner> for process::Command
 {
-  pub fn new(inner: &'inner mut process::Command, root: impl AsRef<Path>, bind: BindMounts, flags: NsFlags) -> Self
+  fn sandbox(&'inner mut self, root: PathBuf, bind: BindMounts, flags: NsFlags) -> Command<'inner>
   {
-    Self { inner, root: PathBuf::from(root.as_ref()), bind, flags }
+    Command { inner: self, root, bind, flags }
   }
+}
 
+impl Command<'_>
+{
   /**
     * # Errors
     *
@@ -238,60 +246,61 @@ impl<'inner> Command<'inner>
     // TO-DO: Flag `share_user` needs more implementation to work properly (uid/gid map)
     unshare(self.flags.into())?;
 
-    let root = self.root;
+    let rootPath = self.root;
+    let root = rootPath.display();
     let bindFlags = Flag::MS_BIND | Flag::MS_PRIVATE | Flag::MS_RDONLY | Flag::MS_SILENT | Flag::MS_REC;
     // rust wants to know dat type
-    let noData: Option<&PathBuf> = None.as_ref();
+    let none: Option<&PathBuf> = None.as_ref();
 
     // Dynamic linker will be required for vast majority of executables
-    let _ = File::create_new(path!(&root, DYNAMIC_LD))?;
-
-    mount(Some(&path!("/", DYNAMIC_LD)), &path!(&root, DYNAMIC_LD), noData, bindFlags, noData)?;
+    let _ = File::create_new(path!(&rootPath, DYNAMIC_LD))?;
+    mount(Some(&path!("/", DYNAMIC_LD)), &path!(&rootPath, DYNAMIC_LD), none, bindFlags, none)?;
 
     for bindFile in (self.bind.files)
     {
       if let Some(parent) = bindFile.parent()
       {
         // The parent directory where the file will be stored
-        create_dir_all(format!("{}/{}", root.display(), parent.display()))?;
+        create_dir_all(format!("{root}/{}", parent.display()))?;
       }
 
       // Create the binding file
-      let _ = File::create_new(format!("{}/{}", root.display(), bindFile.display()))?;
+      let _ = File::create_new(format!("{root}/{}", bindFile.display()))?;
 
-      mount(Some(&bindFile), format!("{}/{}", root.display(), bindFile.display()).as_str(), noData, bindFlags, noData)?;
+      mount(Some(&bindFile), format!("{root}/{}", bindFile.display()).as_str(), none, bindFlags, none)?;
     }
 
     for bindDir in (self.bind.dirs)
     {
       // Create the binding directory
-      create_dir_all(format!("{}/{}", root.display(), bindDir.display()).as_str())?;
-      mount(Some(&bindDir), format!("{}/{}", root.display(), bindDir.display()).as_str(), noData, bindFlags, noData)?;
-    }
+      create_dir_all(format!("{root}/{}", bindDir.display()).as_str())?;
 
-    // Change root directory to the prepared container
-    chroot(&root)?;
+      mount(Some(&bindDir), format!("{root}/{}", bindDir.display()).as_str(), none, bindFlags, none)?;
+    }
 
     if (*oncelock!(&MOUNT_SYSTEM_FS.unwrap_or(false)))
     {
       // These are universal pseudo flags that are applied to sys, dev and proc
-      let sys = Flag::MS_PRIVATE | Flag::MS_BIND | Flag::MS_NOSUID | Flag::MS_NOEXEC | Flag::MS_SILENT | Flag::MS_REC;
-      let tmp = Flag::MS_RELATIME;
+      let sys = Flag::MS_BIND | Flag::MS_PRIVATE | Flag::MS_NOSUID | Flag::MS_NOEXEC | Flag::MS_SILENT;
+      let tmp = Flag::MS_NOSUID | Flag::MS_NODEV;
 
       // Mount system pseudo-filesystems
-      mount(Some("sysfs"), "/sys", Some("sysfs"), sys | Flag::MS_NODEV, noData)?;
-      mount(Some("proc"), "/proc", Some("proc"), sys | Flag::MS_NODEV, noData)?;
-      mount(Some("devtmpfs"), "/dev", Some("devtmpfs"), sys, noData)?;
-      mount(Some("tmpfs"), "/tmp", Some("tmpfs"), tmp, noData)?;
-      mount(Some("tmpfs"), "/run", Some("tmpfs"), tmp, noData)?;
+      mount(Some("/sys"), format!("{root}/sys").as_str(), none, sys | Flag::MS_NODEV, none)?;
+      mount(Some("/proc"), format!("{root}/proc").as_str(), none, sys | Flag::MS_NODEV, none)?;
+      mount(Some("/dev"), format!("{root}/dev").as_str(), none, sys, none)?;
+      mount(Some("tmpfs"), format!("{root}/tmp").as_str(), Some("tmpfs"), tmp, none)?;
+      mount(Some("tmpfs"), format!("{root}/run").as_str(), Some("tmpfs"), tmp, none)?;
 
       if (*oncelock!(&LINK_DBUS.unwrap_or(false)) && PathBuf::from("/run/dbus").is_dir())
       {
-        create_dir(format!("{}/run/dbus", root.display()))?;
+        create_dir(format!("{root}/run/dbus"))?;
         // Bind the dbus socket-containing directory
-        mount(Some("/run/dbus"), format!("{}/run/dbus", root.display()).as_str(), noData, Flag::MS_BIND, noData)?;
+        mount(Some("/run/dbus"), format!("{root}/run/dbus").as_str(), none, Flag::MS_BIND, none)?;
       }
     }
+
+    // Change root directory to the prepared container
+    chroot(&rootPath)?;
 
     // Now that we are fully sandboxed we spawn the process
     self.inner.current_dir("/").spawn()
@@ -321,6 +330,7 @@ impl<'inner> Command<'inner>
         umount2(dest, UnmountFlag::MNT_FORCE)?;
       }
     }
+
     Ok(())
   }
 }
@@ -432,13 +442,12 @@ fn main()
     Some(root) =>
     {
       let exec = argIter.next().ok_or(Error("Provide an executable!")).handle();
-
       // Its okay to not provide any arguments with collect
       let args: Vec<String> = argIter.collect();
       let bind = BindMounts { files: bindFiles, dirs: bindDirs };
 
       // Execute the command in the sandbox
-      let mut child = Command::new(process::Command::new(exec).args(args), &root, bind, flags).spawn().errorize().handle();
+      let mut child = process::Command::new(exec).args(args).sandbox(root.into(), bind, flags).spawn().errorize().handle();
 
       // Wait until we have finished
       child.wait().unwrap();

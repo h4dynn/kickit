@@ -1,19 +1,24 @@
 //! Init state management
 
 use std::sync::Mutex;
-use crate::display_enum;
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default, derive_more::Display)]
 #[must_use]
-pub enum InitState { #[default] Ok = 0x02, Emergency = 0xa8, Stalled = 0xdc, Down = 0x20 }
+pub enum InitState
+{
+  #[default]
+  #[display("Running")]
+  Ok = 0x02,
+  #[display("Emergency")]
+  Emergency = 0xa8,
+  #[display("Stalled")]
+  Stalled = 0xdc,
+  #[display("Down")]
+  Down = 0x20
+}
 
 // Setup a global mutex for the state, this can change once locked
 pub static INIT_STATE: Mutex<InitState> = Mutex::new(InitState::Ok);
-
-display_enum!
-{
-  InitState { Ok => "Running", Emergency => "Emergency", Stalled => "Stalled", Down => "Down" }
-}
 
 impl From<u8> for InitState
 {

@@ -1,11 +1,5 @@
 # Example kickit target
 
-# How verbosely we store logs
-# 0 => Don't log anything (not recommended),
-# 1 => Capture services log only,
-# 2 => Capture services + init log (default)
-log_level = 2
-
 # Our device's hostname- defaults to "localhost" if unset
 # (do not include spaces here)
 hostname = "my_very_cool_computer"

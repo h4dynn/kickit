@@ -1,7 +1,8 @@
 //! power.rs - Shutdown & reboot safely
 
-use std::{convert::Infallible, ffi::OsString};
-use super::{NO_INIT, oncelock, console::{Error, ErrorResult, Result}};
+use std::convert::Infallible;
+use crate::console::ErrorResult;
+use super::{PID, oncelock, console::{Error, Result}};
 use nix::sys::reboot::RebootMode;
 
 oncelock! {
@@ -54,47 +55,23 @@ pub fn forcePoweroff(mode: Mode) -> Result<Infallible>
   */
 pub fn poweroff(mode: Mode) -> Result<Infallible>
 {
-  use crate::{path, continueif, console::{Colour, HandleError, ReturnError}};
-  use super::{mount::{unmount, unmountFlags, UnmountFlag::Lazy}, console::{status, warn}};
+  use crate::{continueif, console::{Colour, HandleError, ReturnError}};
+  use super::{mount::{unmount, unmountFlags, UnmountFlag::Lazy}, service::SERVICES, console::{status, warn}};
   use nix::{unistd::Pid, sys::{reboot::reboot, signal::{kill, Signal}}};
   use std::{fs, path::PathBuf, process};
 
-  let noInit = *oncelock!(&NO_INIT)?;
-  let pidsAndNames: Vec<(u32, OsString)> =
-  {
-    let mut inner = Vec::new();
-
-    // List all the services in the runfs directory
-    for maybeService in (fs::read_dir(PathBuf::from("/run/kickit/service")).into_trace(Error::RunFsFail)?)
-    {
-      let name = maybeService.into_trace(Error::Unknown)?.file_name();
-      let pidPath = path!("/run/kickit/service", &name, "pid");
-
-      // Test if this is a RunOnce service & if so we don't need to do anything here
-      continueif! (path!("/run/kickit/service", &name, "exited").is_file());
-
-      // Read the little-endian ordered PID u32 bytes
-      let pid = u32::from_le_bytes(fs::read(pidPath).into_trace(Error::RunFsFail)?
-                  .try_into()
-                  .map_err(|_| Error::Format.trace("Bad pid contents!").context(name.display()))?);
-
-      inner.push((pid, name));
-    }
-
-    inner
-  };
-
+  let noInit = oncelock!(&PID)?.is_some();
   // This makes sure that when we kill the services, the service manager doesn't throw an error
   oncelock! { POWER_OFF_READY = true }?;
 
-  for (pid, name) in (pidsAndNames)
+  for (name, pid) in (oncelock!(&SERVICES)?)
   {
-    status!("Killing service: {}", name.display());
+    status!("Killing service: {name}");
 
     // First try killing with SIGQUIT
     if let Err(err) = kill(Pid::from_raw(pid.cast_signed()), Some(Signal::SIGQUIT)).into_trace(Error::Unknown)
     {
-      err.warn();
+      warn!("Failed to kill service, so we will force kill it: {}", err.trace);
       // If that doesn't work we use SIGKILL
       kill(Pid::from_raw(pid.cast_signed()), Some(Signal::SIGKILL)).into_trace(Error::Unknown).or_warn();
     }

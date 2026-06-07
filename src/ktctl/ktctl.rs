@@ -5,10 +5,10 @@
 
 extern crate chrono;
 
-use kickit::{console::{HandleError, Colour, ExtendWithContext},
-              socket::{Core, Log, Power},
-              ktctl::{console::{StdResult, Result, ConvError, Error}, socket::Request},
-              console::affirm, display_enum, binary, state::InitState};
+use std::fmt;
+use kickit::{console::{HandleError, Colour, ExtendWithContext}, socket::{Core, Log, Power},
+              ktctl::{console::{StdResult, Result, Error}, socket::Request},
+              console::{guard, ErrorResult}, binary, state::InitState};
 
 // Dummy structure
 struct Init;
@@ -26,13 +26,13 @@ trait RunOperation
     if (self.root())
     {
       // Make sure we are root user
-      affirm!(getuid().is_root(), Error::OperationNotPermitted.trace(""));
+      guard!(!getuid().is_root() => Error::OperationNotPermitted.into());
     }
 
     if (self.initOnly())
     {
-      // Needs kickit to be ran
-      affirm!(Init::is_running().await, Error::InitNotRunning.trace(""));
+      // Needs kickit to be ran as the init process
+      guard!(!Init::is_running().await => Error::InitNotRunning.into());
     }
 
     Ok(())
@@ -67,46 +67,49 @@ enum Usage
   Taskitty
 }
 
-display_enum!
+impl fmt::Display for Usage
 {
-  // Show the usage prompts for the help operation
-  Usage {
-    Main =>
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+  {
+    write!(f, "{}", match (self)
     {
-      format!("{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}\n{}\n",
-        "Usage: ", binary!(), " [OPERATION]",
-        "Manage the kickit init system",
-        '\n',
-        "Operations:",
-        " help                     Show this help prompt",
-        " version                  Show kickit version",
-        " service [S]              List all services or selected services",
-        " log (--init) <S>         Read a service's logs",
-        " state                    Show current init state",
-        " target                   Show current loaded target",
-        " shutdown [--force]       Shutdown this device (force not recommended!)",
-        " reboot [--force]         Reboot this device (force not recommended!)",
-        '\n',
-        "Try 'ktctl help [OPERATION]' for more info",
-        b = Colour::BOLD, r = Colour::RESET
-      )
-    },
-    Log =>
-    {
-      format!("{}{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n",
-        "Usage: ", binary!(), " log", " [ARGUMENTs..] [SERVICE]",
-        "View a service's or init's logs (requires root access)",
-        '\n',
-        "Arguments:",
-        " --plain              Plain output (no colours + timestamp as millis)",
-        " --init               View the init's master log",
-        " --service-only       Ignore any messages from init",
-        b = Colour::BOLD, r = Colour::RESET
-      )
-    },
-    Service => format!("Usage: {}{} service{} [NAMEs..]", binary!(), Colour::BOLD, Colour::RESET),
-    // ^.^
-    Taskitty => include_str!("../../assets/taskitty.txt").to_string()
+      Self::Main =>
+      {
+        format!("{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}\n{}\n",
+          "Usage: ", binary!(), " [OPERATION]",
+          "Manage the kickit init system",
+          '\n',
+          "Operations:",
+          " help                     Show this help prompt",
+          " version                  Show kickit version",
+          " service [S]              List all services or selected services",
+          " log (--init) <S>         Read a service's logs",
+          " state                    Show current init state",
+          " target                   Show current loaded target",
+          " shutdown [--force]       Shutdown this device (force not recommended!)",
+          " reboot [--force]         Reboot this device (force not recommended!)",
+          '\n',
+          "Try 'ktctl help [OPERATION]' for more info",
+          b = Colour::BOLD, r = Colour::RESET
+        )
+      },
+      Self::Log =>
+      {
+        format!("{}{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n",
+          "Usage: ", binary!(), " log", " [ARGUMENTs..] [SERVICE]",
+          "View a service's or init's logs (requires root access)",
+          '\n',
+          "Arguments:",
+          " --plain              Plain output (no colours + timestamp as millis)",
+          " --init               View the init's master log",
+          " --service-only       Ignore any messages from init",
+          b = Colour::BOLD, r = Colour::RESET
+        )
+      },
+      Self::Service => format!("Usage: {}{} service{} [NAMEs..]", binary!(), Colour::BOLD, Colour::RESET),
+      // ^.^
+      Self::Taskitty => include_str!("../../assets/taskitty.txt").to_string()
+    })
   }
 }
 
@@ -133,7 +136,7 @@ impl Init
   {
     use InitState::{Down, Emergency, Stalled};
 
-    if let Ok(state) = Core.request(Core::STATE).await
+    if let Ok(Ok(state)) = Core.request(Core::STATE).await
     {
       // Convert the state from a u8 byte to an InitState
       match (state[0].into())
@@ -144,7 +147,7 @@ impl Init
            * Make sure the version of `ktctl` and `kickit` match to avoid
            * potential compatibility issues
            */
-          if let Ok(version) = Core.request(Core::VERSION).await &&
+          if let Ok(Ok(version)) = Core.request(Core::VERSION).await &&
               (version.as_slice() == format!("{}\n", env!("CARGO_PKG_VERSION")).as_bytes())
           {
             return InitState::Ok
@@ -178,7 +181,7 @@ impl Init
      * Request the init PID from the socket, this is how we test if kickit
      * is running as the init process or not
      */
-    let initPid = u32::from_le_bytes(Core.request(Core::PID).await?.try_into()
+    let initPid = u32::from_le_bytes(Core.request(Core::PID).await??.try_into()
                                       .map_err(|_| Error::Format.trace("Invalid init pid!"))?);
 
     if (initPid == 1)
@@ -200,7 +203,7 @@ impl Init
 
   pub async fn readLog() -> Result<()>
   {
-    eprintln!("{}", String::from_utf8(Log.request(Log::MASTER).await?).into_trace(Error::Format)?);
+    eprintln!("{}", String::from_utf8(Log.request(Log::MASTER).await??).into_trace(Error::Format)?);
     Ok(())
   }
 }
@@ -251,7 +254,7 @@ impl Operation
   async fn targetInfo() -> Result<()>
   {
     // Read target name from the socket, and format as a String
-    eprint!("{}", String::from_utf8(Core.request(Core::TARGET).await?).into_trace(Error::Format).context("target")?);
+    eprint!("{}", String::from_utf8(Core.request(Core::TARGET).await??).into_trace(Error::Format).context("target")?);
     Ok(())
   }
 
@@ -268,20 +271,16 @@ impl Operation
       false => Power::SHUTDOWN
     };
 
-    let noInit =
-    {
-      let response = Core.request(Core::NO_INIT).await?[0];
-      match (response)
-      {
-        0 => Ok(false), 1 => Ok(true),
-        // This really should never happen but is still a possibility
-        _ => Err(Error::SocketResponse.trace(format!("Expected a boolean, got {response}")))
-      }
-    }?;
-    // Send power signal
-    let _ = Power.request(ask).await?;
+    let initPid = u32::from_le_bytes(Core.request(Core::PID).await??
+                                      .try_into().map_err(|_| Error::SocketResponse.trace("Invalid sized LE integer from init!"))?);
 
-    if (!noInit)
+    // Send power signal
+    if let Ok(Err(error)) = Power.request(ask).await
+    {
+      return Err(error.into());
+    }
+
+    if (initPid == 1)
     {
       // Block until shutdown
       park();
@@ -306,7 +305,7 @@ impl RunOperation for Operation
 
   async fn run(self) -> Result<()>
   {
-    use kickit::ktctl::service::{Service, serviceList};
+    use kickit::ktctl::service::{PartialService, serviceList};
     use Operation::{Help, Version, ServiceList, ServiceRestart, State, TargetInfo,
                   InitLog, Log, Shutdown, Reboot};
 
@@ -325,7 +324,7 @@ impl RunOperation for Operation
       ServiceRestart(..) => todo!(), /*serviceRestart(services),*/
       Log(name, ugly, ignoreInit) =>
       {
-        let service: Service = name.as_str().into();
+        let service = PartialService::import(&name)?;
         service.readLog(ugly, ignoreInit)
       },
       InitLog => Init::readLog().await,
@@ -396,8 +395,8 @@ fn parseArgs(mut arguments: Vec<String>) -> Result<Operation>
     },
     "log" =>
     {
-      // Must be at least log + service name
-      affirm!(arguments.len() > 2, Error::MissingArgument.trace("log"));
+      // Must provide at least service name
+      guard!(arguments.len() < 2 => Error::MissingArgument.trace("log"));
 
       let args = &arguments[2..];
 

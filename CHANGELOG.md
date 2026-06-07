@@ -1,3 +1,26 @@
+## 1-7 June 2026
+
+* Overhaul ktctl service information gathering with new
+  cached configuration
+
+* Add namespace-based sandboxing support for services
+  with new executable `warden`
+
+* Improve socket error handling
+
+* Add proper support for services with the `Forking`
+  pattern
+
+* Remove useless `log_level` option in service config
+
+## 20-21 May 2026
+
+* Add timeout for services with `RunOnce` pattern
+
+* Improve the service watcher's implementation
+
+* Fix optional services throwing fatal errors
+
 ## 14-19 May 2026
 
 * Add support for /etc/fstab entry mounting

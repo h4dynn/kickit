@@ -20,7 +20,7 @@ pre_build()
 do_build()
 {
   . ~/.cargo/env
-  cargo build --release --target x86_64-unknown-linux-musl --features stable
+  cargo build --release --target x86_64-unknown-linux-musl
 }
 
 do_install()

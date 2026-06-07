@@ -1,7 +1,7 @@
 //! I/O with init sockets
 
-use crate::{Data, socket::{Socket, PeerError}, console::ExtendWithContext};
-use super::console::{Error, ErrorTrace, Result, ConvError};
+use crate::{Data, socket::{Socket, PeerError}, console::{ExtendWithContext, ErrorResult}};
+use super::console::{Error, ErrorTrace, StdResult, Result};
 
 impl From<PeerError> for ErrorTrace
 {
@@ -11,14 +11,19 @@ impl From<PeerError> for ErrorTrace
   }
 }
 
+trait SocketResult<OkType>
+{
+  fn result(&self) -> Result<StdResult<OkType, PeerError>>;
+}
+
 pub trait Request: Socket + Sized + Send + Sync
 {
-  fn request(self, input: u8) -> impl Future<Output = Result<Data>> + Send
+  // Expect the socket to give us a response
+  fn request(self, input: u8) -> impl Future<Output = Result<StdResult<Data, PeerError>>> + Send
   {
-    async move
-    {
-      use tokio::{net::UnixStream, io::AsyncReadExt};
+    use tokio::{net::UnixStream, io::AsyncReadExt};
 
+    async move {
       // Determine where the socket is that we want to interact with
       let path = self.path();
 
@@ -36,16 +41,27 @@ pub trait Request: Socket + Sized + Send + Sync
       io.readable().await.into_trace(Error::SocketAccessFail)?;
       io.read_to_end(&mut out).await.into_trace(Error::SocketAccessFail).context("io.Core")?;
 
-      // If we have an error then 2 bytes will be provided (marker + type)
-      if (out.len() == 2 && out[0] == PeerError::IS_ERROR)
-      {
-        // Make sure this singular byte isn't an error
-        PeerError::errorize([out[0], out[1]]).map(|ok| ok.to_vec()).map_err(ErrorTrace::from)
-      }
-      else {
-        // We're all good!
-        Ok(out)
-      }
+      out.result()
+    }
+  }
+}
+
+impl<S: AsRef<[u8]>> SocketResult<Vec<u8>> for S
+{
+  fn result(&self) -> Result<StdResult<Vec<u8>, PeerError>>
+  {
+    let inner = self.as_ref();
+
+    if (inner.len() < 2)
+    {
+      return Err(Error::SocketResponse.trace(format!("Expected at least 2 bytes, got {}", inner.len())))
+    }
+
+    match (inner[0])
+    {
+      PeerError::IS_OK => Ok(Ok(inner[1..].to_vec())),
+      PeerError::IS_ERROR => Ok(Err(PeerError::errorize(inner[1]).into_trace(Error::SocketResponse)?)),
+      bad => Err(Error::SocketResponse.trace(format!("Expected ok/err, got {bad}")))
     }
   }
 }

@@ -7,6 +7,7 @@
 
 extern crate ruzstd;
 extern crate thiserror;
+extern crate derive_more;
 
 pub mod init;
 pub mod ktctl;
@@ -31,7 +32,7 @@ pub type Data = Vec<u8>;
  * A delimited vector iterator, which will iterate over each inner item with the delimiter
  * appended, except for the last item
  */
-#[derive(Clone)]
+#[derive(Clone,)]
 pub struct DelimVecIter<T: Display>
 {
   delim: char,
@@ -40,17 +41,19 @@ pub struct DelimVecIter<T: Display>
   vec: Vec<T>
 }
 
+#[cfg(feature = "stable")]
+pub const RELEASE: Release = Release::Stable;
+
+#[cfg(not(feature = "stable"))]
 pub const RELEASE: Release = Release::Unstable;
+
 // Where the important files for kickit live
 pub const PREFIX: &str = "/usr/lib/kickit";
 
-display_enum!
+#[derive(Eq, PartialEq, Copy, Clone, Debug, Default, derive_more::Display)]
+pub enum Release
 {
-  #[derive(Eq, PartialEq, Copy, Clone, Debug, Default)]
-  pub enum Release
-  {
-    Stable, Testing, #[default] Unstable
-  }
+  Stable, Testing, #[default] Unstable
 }
 
 // Convert a Vector that may be empty to an Option
@@ -65,21 +68,32 @@ pub trait TrashUnused: Sized
   fn trash(self) {}
 }
 
+pub trait DumpVec: Sized
+{
+  /*
+   * Remove all of `SIZE` bytes from the front of the vector, moving them into
+   * an array
+   *
+   * SAFETY: This doesn't check if your array is big enough to index through
+   * the length provided. You need to implement those checks yourself before
+   * using this!
+   */
+  fn front_dump<const SIZE: usize>(&mut self) -> [u8; SIZE];
+  // Same as the above but move from the end of the vector
+  fn back_dump<const SIZE: usize>(&mut self) -> [u8; SIZE];
+}
+
 #[must_use]
 pub fn version() -> String
 {
+  use crate::{tern, Release::Stable};
+
   [
     // Display version as a string
     env!("CARGO_PKG_VERSION").to_owned(),
-
-    if (crate::RELEASE == crate::Release::Stable)
-    {
-      // Nothing needs to be added here
-      String::new()
-    }
-    else {
-      // Add the current release at the end if unstable
-      format!(" ({})", crate::RELEASE)
+    tern! {
+      crate::RELEASE == Stable => String::new(),
+      else => format!(" ({})", crate::RELEASE)
     }
   ]
     // And join both of those together without a seperator
@@ -90,12 +104,9 @@ impl<T, S: Deref<Target = Vec<T>>> OptionEmptyVec for S
 {
   fn empty_none(self) -> Option<Self>
   {
-    if ((*self).is_empty())
-    {
-      None
-    }
-    else {
-      Some(self)
+    tern! {
+      (*self).is_empty() => None,
+      else => Some(self)
     }
   }
 }
@@ -131,6 +142,61 @@ impl<T: Display> DelimVecIter<T>
   pub const fn new(vec: Vec<T>, delim: char) -> Self
   {
     Self { delim, current: 0, vec }
+  }
+}
+
+// A VecDeque is the way to go for this, since they are designed to be able to remove from the front
+impl DumpVec for std::collections::VecDeque<u8>
+{
+  fn front_dump<const SIZE: usize>(&mut self) -> [u8; SIZE]
+  {
+    let mut dump = [0u8; SIZE];
+
+    for index in (&mut dump)
+    {
+      *index = self.pop_front().unwrap();
+    }
+
+    dump
+  }
+
+  fn back_dump<const SIZE: usize>(&mut self) -> [u8; SIZE]
+  {
+    let mut dump = [0u8; SIZE];
+
+    for index in (&mut dump)
+    {
+      *index = self.pop_back().unwrap();
+    }
+
+    dump
+  }
+}
+
+impl DumpVec for Vec<u8>
+{
+  fn front_dump<const SIZE: usize>(&mut self) -> [u8; SIZE]
+  {
+    let mut dump = [0u8; SIZE];
+
+    for index in (&mut dump)
+    {
+      *index = self.remove(0);
+    }
+
+    dump
+  }
+
+  fn back_dump<const SIZE: usize>(&mut self) -> [u8; SIZE]
+  {
+    let mut dump = [0u8; SIZE];
+
+    for index in (&mut dump)
+    {
+      *index = self.pop().unwrap();
+    }
+
+    dump
   }
 }
 
@@ -185,129 +251,6 @@ macro_rules! wrap
         }
       }
     )+
-  };
-}
-// Implement std::fmt::Display for enumeration in a nicely formatted way
-#[macro_export]
-macro_rules! display_enum
-{
-  /*
-   * Implement some displayable text for each variant of an enum, for example:
-   *
-   * ```
-   *   use crate::display_enum;
-   *   enum Animal { Cat, Gecko, Hamster }
-   *
-   *   display_enum!
-   *   {
-   *     Animal {
-   *       Cat => "cute",
-   *       Gecko => "very cute",
-   *       Hamster => "cute & tiny"
-   *     }
-   *   }
-   *
-   *   fn main()
-   *   {
-   *     // This will display "geckos are very cute"
-   *     eprintln!("geckos are {}", Animal::Gecko);
-   *   }
-   * ```
-   */
-  { $($name: ty { $($variant: ident => $fmt: expr),* }),* } =>
-  {
-    $(impl std::fmt::Display for $name
-    {
-      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
-      {
-        // Add each variant & their corresponding display text
-        write!(f, "{}", match (self) { $(Self::$variant => $fmt,)* })
-      }
-    })*
-  };
-  /*
-   * Display a variant as its name, for example:
-   *
-   * ```
-   *   use crate::display_enum;
-   *
-   *   // Each variant will be displayed as their name
-   *   display_enum!
-   *   {
-   *     #[derive(Thoughts, Behavior)]
-   *     pub enum Feeling
-   *     {
-   *       Happy,
-   *       Sad,
-   *       Angry
-   *     }
-   *   }
-   *
-   *   fn main()
-   *   {
-   *     // output: "Today I am feeling Happy"
-   *     eprintln!("Today I am feeling {}", Feeling::Happy);
-   *   }
-   * ```
-   */
-  { $(#[$ea: meta])? $vis: vis enum $name: ident { $($(#[$va: meta])? $var: ident),* } } =>
-  {
-    $(#[$ea])?
-    $vis enum $name
-    {
-      $(
-        $(#[$va])?
-        $var
-      ),*
-    }
-
-    impl std::fmt::Display for $name
-    {
-      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
-      {
-        write!(f, "{}", match (self)
-        {
-          $(
-            // Convert the variant token provided directly in the macro to a string
-            Self::$var => stringify!($var)
-          ),*
-        })
-      }
-    }
-  };
-  /*
-   * Display a variant as its representing value, for example:
-   *
-   * ```
-   *   use crate::display_enum;
-   *
-   *   #[derive(Debug)]
-   *   enum Member
-   *   {
-   *     Ray = 130,
-   *     Chloe = 622,
-   *     Jayden = 905
-   *   }
-   *
-   *   // Each variant will be displayed as their ID
-   *   display_enum! { Member as u128 }
-   *
-   *   fn main()
-   *   {
-   *     // This will display "Chloe's member ID is: 622"
-   *     eprintln!("Chloe's member ID is: {}", Member::Chloe);
-   *   }
-   * ```
-   */
-  { $(name: ty as $repr: ty),* } =>
-  {
-    $(impl std::fmt::Display for $name
-    {
-      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error>
-      {
-        write!(f, "{}", self as $repr)
-      }
-    })*
   };
 }
 /*
@@ -437,6 +380,28 @@ macro_rules! oncelock
     }
     else {
       Err(Error::Unknown.trace("OnceLock value has not been set yet!"))
+    }
+  };
+}
+
+// A C-style ternary expression with different syntax due to Rust macro fragments (? can't come after expr)
+#[macro_export]
+macro_rules! tern
+{
+  { $eval: expr => $cond: expr, $($eeval: expr => $econd: expr,)* else => $fallback: expr } =>
+  {
+    if ($eval)
+    {
+      $cond
+    }
+    $(
+      else if ($eeval)
+      {
+        $econd
+      }
+    )*
+    else {
+      $fallback
     }
   };
 }

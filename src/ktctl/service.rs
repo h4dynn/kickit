@@ -1,96 +1,94 @@
 //! Service access from runfs
 
-use std::{fs, fs::File, ffi::OsString, path::PathBuf};
-use super::{console::{Result, Error, ConvError}};
-use crate::{console::{Colour, ExtendWithContext}, affirm, path};
+use std::{fs, fs::File, boxed::Box, io, path::PathBuf};
+use super::{console::{Result, Error}};
+use crate::{console::{Colour, ExtendWithContext, ErrorResult}, guard, path,
+              init::service::{Pattern, Pattern::Standard}};
 
-// Lookup service from the runfs directory
+// This is only partial because we don't know everything about it
 #[derive(PartialEq, Eq, Clone, Debug)]
-pub struct Service
+pub struct PartialService
 {
-  name: String
+  // This is the only field you must provide, in ktctl this is provided by indexing /run/kickit/service
+  name: Box<str>,
+  // These are imported from the service's cache
+  pattern: crate::init::service::Pattern,
+  sandboxed: bool,
+  status: Option<i32>,
+  pid: u32
 }
 
-impl From<OsString> for Service
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+struct CacheInstance(u8, u8, /* option switch */ u8, /* (optional) i32 LE bytes */ [u8; 4], /* u32 LE bytes */ [u8; 4]);
+
+impl CacheInstance
 {
-  // Display our OsString first and then use that Display to be converted to a String
-  fn from(name: OsString) -> Self
+  // Read 3 seperate bytes from cache, followed by 4 bytes of LE u32 bytes (pid)
+  pub(super) fn new(mut source: impl io::Read) -> Result<Self>
   {
-    Self { name: name.display().to_string() }
+    // 3 bytes of different types (pattern -> sandboxed -> option switch)
+    let mut bytes = [0u8; 3];
+    source.read_exact(&mut bytes).into_trace(Error::ServiceConfig)?;
+
+    // If bytes[2] is set to 1, a i32 status is available but if not, none is available (just 4 null bytes for padding)
+    let mut maybeStatus = [0u8; 4];
+    source.read_exact(&mut maybeStatus).into_trace(Error::ServiceConfig)?;
+
+    // PID u32 bytes in little-endian order
+    let mut pidRaw = [0u8; 4];
+    source.read_exact(&mut pidRaw).into_trace(Error::ServiceConfig)?;
+
+    Ok(Self(bytes[0], bytes[1], bytes[2], maybeStatus, pidRaw))
+  }
+
+  pub(super) fn export(self) -> Result<(Pattern, bool, Option<i32>, u32)>
+  {
+    // Must be one of the 3 patterns available, see `init::service::Pattern` for their respective bytes
+    let pattern = <Pattern as TryFrom<u8>>::try_from(self.0).into_trace(Error::ServiceConfig)?;
+    // This is just a bool so will be 0 for false, 1 for true
+    let sandboxed: bool = self.1.try_into().into_trace(Error::ServiceConfig)?;
+    // Option switch - if there is a i32 available for us (status) then its 1, if not 0
+    let switch: bool = self.2.try_into().into_trace(Error::ServiceConfig)?;
+
+    Ok((pattern, sandboxed, switch.then_some(i32::from_le_bytes(self.3)), u32::from_le_bytes(self.4)))
   }
 }
 
-/*
- * (slight annoyance): we can't use a generic AsRef<str> because of way too strict
- * Rust compilation rules:
- *   upstream crates may add a new impl of trait `std::convert::AsRef<str>` for type
- *   `std::ffi::OsString` in future versions
- */
-impl From<&str> for Service
+impl PartialService
 {
-  fn from(name: &str) -> Self
-  {
-    Self { name: name.to_owned() }
-  }
-}
-
-impl Service
-{
-  #[must_use]
-  pub fn is_standard(&self) -> bool
-  {
-    fs::metadata(path!("/run/kickit/service/", &self.name, "pid")).is_ok()
-  }
-
-  #[must_use]
-  pub fn is_sandboxed(&self) -> bool
-  {
-    path!("/run/kickit/service/", &self.name, "container").is_dir()
-  }
-
-  /**
-    * # Errors
-    *
-    * * Failed to read from the service's PID file,
-    * * Received incorrect length of bytes from service's PID file (should be 4 bytes)
-    */
-  pub fn pid(&self) -> Result<Option<u32>>
-  {
-    if (self.is_standard())
-    {
-      let rawPid = fs::read(path!("/run/kickit/service", &self.name, "pid"))
-                      .into_trace(Error::AccessRunFsFail)?;
-
-      // Read the PID in little-endian ordered bytes
-      let pid = u32::from_le_bytes(rawPid.try_into()
-                  .map_err(|_| Error::Format.trace(format!("Invalid PID for {}", &self.name)))?);
-
-      Ok(Some(pid))
-    }
-    else {
-      Ok(None)
-    }
-  }
-
-  /**
-    * # Errors
-    *
-    * * Failed to get the service's PID,
-    *
-    * # Panics
-    * * stat file doesn't exist for the PID (should never happen)
-    */
   #[inline]
-  pub fn path(&self, pathName: &str) -> Result<String>
+  #[must_use]
+  pub fn path(&self, path: &str) -> PathBuf
   {
-    if (pathName == "stat")
+    if (path == "stat")
     {
-      // This file should exist or else its a bug
-      Ok(format!("/proc/{}/stat", self.pid()?.expect("path(stat): pid is missing")))
+      PathBuf::from(format!("/proc/{}/stat", self.pid))
     }
     else {
-      panic!()
+      path!("/run/kickit/service", self.name.as_ref(), path)
     }
+  }
+
+  /**
+    * # Errors
+    *
+    * * Service does not exist for this current init session,
+    * * Failed to open the service's cached configuration file,
+    * * Failed to export cache configuration
+    */
+  pub fn import(name: &str) -> Result<Self>
+  {
+    // Make sure the requested service actually exists for this init session
+    guard!(!path!("/run/kickit/service", name).is_dir() => Error::BadService.trace("No such file or directory").context(name));
+
+    // Open the cached config file
+    let cacheFile = File::open(path!("/run/kickit/service", name, "config")).into_trace(Error::BadService).context(name)?;
+    let cache = CacheInstance::new(cacheFile).context(name)?;
+
+    // Convert values from raw byte to their types
+    let (pattern, sandboxed, status, pid) = cache.export().context(name)?;
+
+    Ok(Self { name: name.into(), pattern, sandboxed, status, pid })
   }
 
   /**
@@ -105,24 +103,15 @@ impl Service
     */
   pub fn print(self) -> Result<()>
   {
-    let status: String =
-    [
-      String::from(
-      {
-        if (self.is_standard())
-        {
-          // Standard services will contain more information (e.g. pid)
-          "├─ Status:   "
-        }
-        else {
-          // Non-standard services will just have a status & nothing else
-          "└─ Status:   "
-        }
-      }),
-      if (self.is_standard())
+    use crate::tern;
+
+    println!("{}{}{}", Colour::BOLD, self.name, Colour::RESET);
+    println!("├─ Status:    {}", tern!
+    {
+      self.pattern == Standard =>
       {
         // Read the /proc/<PID>/stat file, which contains the process's status information
-        if let Ok(stat) = fs::read_to_string(self.path("stat")?)
+        if let Ok(stat) = fs::read_to_string(self.path("stat"))
         {
           // The 3rd member (split by spaces) contains the status we want (e.g. I = idle)
           match (stat.split(' ').nth(2))
@@ -141,34 +130,30 @@ impl Service
         else {
           format!("{}Dead{}", Colour::RED, Colour::RESET)
         }
-      }
-      /*
-       * If the `/run/kickit/service/<S>/killed` file exists, we know the service
-       * process exited on an OK signal (0)
-       */
-      else if (fs::metadata(path!("/run/kickit/service/", &self.name, "exited")).is_ok())
+      },
+      // Service is non-standard & has finished successfully
+      self.status == Some(0) => format!("{}Finished{}", Colour::GREEN, Colour::RESET),
+      else =>
       {
-        format!("{}Finished{}", Colour::GREEN, Colour::RESET)
+        if let Some(code) = self.status
+        {
+          format!("{}Failed{} (exit code {code})", Colour::RED, Colour::RESET)
+        }
+        else {
+          format!("{}Failed{}", Colour::RED, Colour::RESET)
+        }
       }
-      // If not, it exited on a failure (non-zero)
-      else {
-        format!("{}Failed{}", Colour::RED, Colour::RESET)
-      }
-    ]
-      .join("");
+    });
 
-    println!("{}{}{}", Colour::BOLD, self.name, Colour::RESET);
-    println!("{status}");
-
-    if (self.is_sandboxed())
+    if (self.sandboxed)
     {
-      println!("├─ Sandbox:  {}active{}", Colour::GREEN, Colour::RESET);
+      println!("{} Sandboxed: {}yes{}", tern! { self.pattern == Standard => "├─", else => "└─" }, Colour::GREEN, Colour::RESET);
     }
 
     // Non-standard services will not have an active PID
-    if (self.is_standard())
+    if (self.pattern == Standard)
     {
-      println!("└─ PID:      {}", self.pid()?.unwrap());
+      println!("└─ PID:       {}", self.pid);
     }
 
     // Print newline seperator for next service
@@ -189,126 +174,95 @@ impl Service
     */
   pub fn readLog(&self, ugly: bool, ignoreInit: bool) -> Result<()>
   {
-    use chrono::{Local, DateTime};
-    use std::{io, io::{BufWriter, Read, Write, ErrorKind::BrokenPipe}, process::exit};
+    use std::{io, io::{BufReader, BufRead, Write, ErrorKind::BrokenPipe}, collections::VecDeque, mem::take, process::exit};
+    use crate::{tern, breakif, DumpVec, init::service::INIT_LOG_ENTRY};
     use ruzstd::decoding::StreamingDecoder;
+    use chrono::{Local, DateTime};
+
+    // We can't use `Colour::BOLD` in concat!() because it only accepts literals
+    const KICKIT_MARKER: &str = concat!("\x1b[1m", "(kickit) ", "\x1b[0m");
+
+    let file = File::open(self.path("log")).into_trace(Error::BadService).context(&self.name)?;
 
     // The decoder implements Read to idiomatically decompress
-    let mut serviceLog = StreamingDecoder::new(File::open(path!("/run/kickit/service", &self.name, "log"))
-                                            .into_trace(Error::BadService).context(&self.name)?)
-                          .into_trace(Error::LogAccessFail).context(&self.name)?;
-
-    let mut logBin = Vec::new();
-    // Read (potentially binary) log contents
-    serviceLog.read_to_end(&mut logBin).into_trace(Error::AccessRunFsFail)?;
+    let decoder = StreamingDecoder::new(file).into_trace(Error::LogAccessFail).context(&self.name)?;
+    // Use `BufReader` for the handy `read_until` method
+    let mut log = BufReader::new(decoder);
 
     // Our stdout that we write to
-    let mut out = BufWriter::new(io::stdout());
+    let mut out = io::stdout();
+    // Binary contents for the current entry
+    let mut vecEntry = Vec::<u8>::new();
 
-    // Log properties for every line
-    let mut timestamp = String::new();
-    let mut logContents = String::new();
-    let mut fromInit = false;
-
-    // Loop through each byte in the log
-    for (logByteCount, logByte) in (logBin.iter().enumerate())
+    while (log.read_until(b'\n', &mut vecEntry).is_ok())
     {
-      match (logByte)
+      // The last entry we get will be empty due to how we are iterating
+      breakif! (vecEntry.is_empty());
+
+      // We are removing from the front, which makes a VecDeque more suitable
+      let mut entry = VecDeque::<u8>::from(take(&mut vecEntry));
+
+      // First 13 bytes will be the timestamp
+      let timestampBytes: [u8; 13] = entry.front_dump();
+      // The timestamp will be in a String
+      let timestampString = &str::from_utf8(&timestampBytes).into_trace(Error::Format)?;
+
+      let fromInit = tern!
       {
-        b'\n' =>
+        entry[0] == INIT_LOG_ENTRY =>
         {
-          // We don't want to show an empty line if it's found (which it shouldn't be)
-          if !(logContents.is_empty() || fromInit && ignoreInit)
-          {
-            let marker = if (fromInit)
-            {
-              if (ugly)
-              {
-                String::from("(kickit) ")
-              }
-              else {
-                format!("{}(kickit){} ", Colour::BOLD, Colour::RESET)
-              }
-            }
-            else {
-              String::new()
-            };
-
-            let lineFormatted =
-            {
-              if (ugly)
-              {
-                // Don't make the timestamp human-readable, just millis
-                format!("[{timestamp}] {marker}{logContents}\n")
-              }
-              else {
-                // Convert the millis type from a String to i64 so it is accepted by chrono
-                let timestampUgly: i64 = timestamp.parse().into_trace(Error::Format)?;
-
-                /*
-                 * Get the timestamp from the log and convert it into an actual date & time,
-                 * then convert from UTC timezone to the system's timzone (Local) using
-                 * the chrono crate magic
-                 */
-                let logTime: DateTime<Local> = DateTime::from_timestamp_millis(timestampUgly)
-                                                .into_trace(Error::LogAccessFail)
-                                                .context(&self.name)?
-                                                .into();
-
-                /*
-                 * Format time as <Day Month Year, Hours:Minutes:Seconds> to not
-                 * anger the Americans
-                 */
-                format!("[{}] {marker}{logContents}\n", logTime.format("%d %b %Y, %H:%M:%S"))
-              }
-            };
-
-            /*
-             * When we output to stdout and another program is piped (e.g. grep),
-             * the program cuts off the pipe after it has consumed everything it
-             * needs so we end up with SIGPIPE. We don't error here if found, since
-             * this is expected & not an actual error, though is treated as one
-             * by println!() so we have to do a janky workaround for compatibility
-             *
-             * (note): This may change in the future though, see
-             * <https://github.com/rust-lang/rust/issues/62569>
-             */
-            out.write_all(lineFormatted.as_bytes())
-                .map_err(|e| if (e.kind() == BrokenPipe) { exit(0) } else { e })
-                .into_trace(Error::Format)?;
-          }
-
-          // Reset our values for next line
-          timestamp.clear();
-          logContents.clear();
-          fromInit = false;
+          // Removing this byte should give us just UTF-8 string bytes
+          let _ = entry.pop_front();
+          true
         },
-        // This is the marker that the message is from the init
-        0x8F =>
-        {
-          // Must be the 14th byte or else something is wrong
-          affirm!(timestamp.len() == 13 && logContents.is_empty(),
-                  Error::Format.trace(format!("Unexpected byte 0x8F on byte {logByteCount}"))
-                                .context(&self.name));
+        else => false
+      };
 
-          fromInit = true;
-        },
-        _ =>
-        {
-          // The timestamp is just 13 bytes long
-          if (timestamp.len() < 13)
-          {
-            // We are not done reading the full timestamp
-            timestamp.push(*logByte as char);
-          }
-          else {
-            // This is real log content, not a timestamp
-            logContents.push(*logByte as char);
-          }
-        }
+      if (fromInit && ignoreInit)
+      {
+        entry.clear();
+        continue
       }
-    }
 
+      // If this entry is from the init, 
+      let marker = fromInit.then_some(tern! { ugly => "(kickit) ", else => KICKIT_MARKER }).unwrap_or_default();
+
+      // `entry` isn't used after this, so this resets it for the next iteration
+      let contents = String::from_utf8(take(&mut entry).into()).into_trace(Error::Format)?;
+
+      let line = if (ugly)
+      {
+        format!("[{timestampString}] {marker}{contents}")
+      }
+      else {
+        // Convert the millis type from a &str to i64 so it is accepted by chrono
+        let timestamp = timestampString.parse::<i64>().into_trace(Error::Format)?;
+        /*
+         * Get the timestamp from the log and convert it into an actual date & time,
+         * then convert from UTC timezone to the system's timzone (Local) using
+         * the chrono crate magic
+         */
+        let logTime: DateTime<Local> = DateTime::from_timestamp_millis(timestamp)
+                                        .ok_or(Error::Time.trace("Failed to convert timestamp from service log"))
+                                        .context(&self.name)?
+                                        .into();
+        // Format time as <Day Month Year, Hours:Minutes:Seconds> to not anger the Americans
+        format!("[{}] {marker}{contents}", logTime.format("%d %b %Y, %H:%M:%S"))
+      };
+
+      /*
+       * When we output to stdout and another program is piped (e.g. grep),
+       * the program cuts off the pipe after it has consumed everything it
+       * needs so we end up with SIGPIPE. We don't error here if found, since
+       * this is expected & not an actual error, though is treated as one
+       * by println!() so we have to do a janky workaround for compatibility
+       *
+       * (note): This may change in the future though, see
+       * <https://github.com/rust-lang/rust/issues/62569>
+       */
+      out.write_all(line.as_bytes()).map_err(|e| if (e.kind() == BrokenPipe) { exit(0) } else { e })
+          .into_trace(Error::Format)?;
+    }
     Ok(())
   }
 }
@@ -321,16 +275,17 @@ impl Service
   */
 pub fn serviceList(maybeTargets: Option<&[String]>) -> Result<()>
 {
-  for service in (fs::read_dir(PathBuf::from("/run/kickit/service"))
-                    .into_trace(Error::RunFsParseFail)?)
+  for maybeService in (fs::read_dir(PathBuf::from("/run/kickit/service")).into_trace(Error::RunFsParseFail)?)
   {
+    let service = maybeService.into_trace(Error::BadService)?.file_name();
     // Import each entry as a service from its OsString file name
-    let upService: Service = service.into_trace(Error::AccessRunFsFail)?.file_name().into();
+    let upService = PartialService::import(service.display().to_string().as_str())?;
+    let name = &*upService.name;
 
     // Only print if targets provided by user allow
     if let Some(targets) = maybeTargets
     {
-      if (targets.contains(&upService.name))
+      if (targets.contains(&name.into()))
       {
         upService.print()?;
       }

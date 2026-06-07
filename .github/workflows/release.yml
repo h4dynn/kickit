@@ -22,7 +22,19 @@ jobs:
           mkdir -m0755 ~/.xbps
           curl -#Lo- http://repo-default.voidlinux.org/static/xbps-static-latest.x86_64-musl.tar.xz | unxz | tar -xC ~/.xbps
 
-      - name: Build kickit
+      - name: Build kickit (unstable)
+        if: ${{ startsWith(github.event.head_commit.message, 'release') }}
+        run: |
+          export PATH=$HOME/.xbps/usr/bin:$PATH
+          # workaround for "/run/self/uid_map: Operation not permitted"
+          sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+          cd package
+          rm -rf kickit
+          mv unstable kickit
+          ./xbps-src pkg kickit
+
+      - name: Build kickit (stable)
+        if: ${{ startsWith(github.event.head_commit.message, 'release') }}
         run: |
           export PATH=$HOME/.xbps/usr/bin:$PATH
           # workaround for "/run/self/uid_map: Operation not permitted"

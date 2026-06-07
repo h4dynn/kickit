@@ -1,20 +1,27 @@
 //! Mount implementation layered over the `nix`
 
-use crate::{display_enum, wrap, OptionEmptyVec};
-use super::console::{Result, Error, ErrorTrace, ErrorResult};
+use crate::{wrap, OptionEmptyVec, console::ErrorResult};
+use super::console::{Result, Error, ErrorTrace};
 
 use std::{fmt, fmt::Display, path::Path};
 
 // Mount flags & their corresponding bit value (MsFlags)
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, derive_more::Display)]
 pub enum Flag
 {
+  #[display("ro")]
   ReadOnly = 1,
+  #[display("nosuid")]
   NoSuid = 2,
+  #[display("nodev")]
   NoDev = 4,
+  #[display("noexec")]
   NoExec = 8,
+  #[display("remount")]
   Remount = 32,
+  #[display("bind")]
   Bind = 4096,
+  #[display("private")]
   Private = 1 << 18
 }
 
@@ -28,14 +35,6 @@ pub enum UnmountFlag
   Expire = 4,
   // Don't follow symlinks to their source
   NoFollow = 8
-}
-
-display_enum!
-{
-  Flag {
-    ReadOnly => "ro", NoSuid => "nosuid", NoDev => "nodev", NoExec => "noexec",
-    Remount => "remount", Bind => "bind", Private => "private"
-  }
 }
 
 pub type Opt = String;

@@ -1,28 +1,24 @@
 //! Error handling, warning & status implementations for the init process
 
-use std::{sync::Mutex, fmt::Display, io};
-use thiserror::Error;
-use crate::{oncelock, console::{Colour, ReturnError, ExtendWithContext}, state::InitState, display_enum};
+use std::{sync::Mutex, fmt::Display};
+use crate::{oncelock, console::{Colour, ReturnError, ErrorResult, ExtendWithContext, error}, state::InitState};
 
+#[derive(derive_more::Display)]
 pub enum Marker
 {
-  Status, Warn, Fatal, Service
+  #[display("\x1b[1m[*]\x1b[0m")]
+  Status,
+  #[display("\x1b[1;33m[-]\x1b[0m")]
+  Warn,
+  #[display("\x1b[1;31m[!]\x1b[0m")]
+  Fatal,
+  #[display("\x1b[1;92m[>]\x1b[0m")]
+  Service
 }
 
 oncelock! {
   // If set to true, master log entries won't be shown on console
   pub static QUIET: bool;
-}
-
-display_enum!
-{
-  Marker
-  {
-    Status => "\x1b[1m[*]\x1b[0m",
-    Warn => "\x1b[1;33m[-]\x1b[0m",
-    Fatal => "\x1b[1;31m[!]\x1b[0m",
-    Service => "\x1b[1;92m[>]\x1b[0m"
-  }
 }
 
 /*
@@ -33,92 +29,61 @@ display_enum!
 #[doc(hidden)]
 pub static MASTER_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-pub use std::result::Result as StdResult;
-// Just a Result where the error type is of ErrorTrace
-pub type Result<S> = StdResult<S, ErrorTrace>;
-
-/*
- * Error stores all possible errors that could be thrown
- * Messages and whether the error should send you to an emergency shell
- * or not are defined in the impl
- */
-#[derive(PartialEq, Eq, Clone, Copy, Debug, Error, Default)]
-#[must_use]
-pub enum Error
-{
-  // A generic error- usually for very specific case errors & impossible situations
-  #[default]
-  #[error("An unknown error occurred")] Unknown,
-  // Errors when starting up the init system
-  #[error("kickit is already running!")] AlreadyRunning,
-  #[error("kickit must be ran as the init process")] NotInit,
-  #[error("Insufficient permissions: kickit can only be ran as root")] NotRoot,
-  // File-related errors i.e. can't access or permission denied
-  #[error("File or directory not found")] FileNotFound,
-  #[error("Failed to setup work directory")] RunFsFail,
-  #[error("Kernel command-line parameter not found")] Cmdline,
-  #[error("Failed to get the current system time")] Time,
-  // When data can't be represented as a UTF-8 string
-  #[error("Failed to format content in UTF-8")] Format,
-  // Target-related errors (see how they are used in `src/target.rs`)
-  #[error("Target not found, has it been created in the library folder?")] TargetNotFound,
-  #[error("A required value is missing in target configuration")] TargetMissingValue,
-  #[error("Failed to parse target configuration file")] TargetParse,
-  // Socket data input/output failure
-  #[error("Failed to start up a socket")] SocketStartup,
-  #[error("Socket read connection failure")] SocketIoRead,
-  #[error("Socket write connection failure")] SocketIoWrite,
-  #[error("Input/output connections failed on socket")] SocketIo,
-  // Service-related errors (used in `src/service.rs`)
-  #[error("Failed to parse service configuration file")] ServiceParse,
-  #[error("Failed to access a service")] ServiceAccess,
-  #[error("Failed to start a service")] ServiceUp,
-  #[error("Failed to stop a service")] ServiceDown,
-  #[error("Failed to start logger for a service")] ServiceLog,
-  #[error("Failed to read from the service's logger")] ServiceLogContent,
-  #[error("Failed to compress/decompress the service's logger")] ServiceLogCompress,
-  #[error("Service was killed or stopped")] ServiceNotRunning,
-  #[error("Service became a zombie")] ServiceZombified,
-  #[error("Invalid sandboxing option specified")] ServiceSandboxBadOpt,
-  #[error("Failed to initialise sandbox directory")] ServiceSandboxInit,
-  #[error("Failed to access a logfile")] AccessLog,
-  // Mount-related failures
-  #[error("Invalid formatted line in fstab")] FstabParse,
-  #[error("Failed to mount a critical filesystem")] SysFsMount,
-  #[error("Failed to unmount a filesystem")] SysFsUnmount,
-  // Pure init errors
-  #[error("Failed to shutdown the init system")] Shutdown,
-  #[error("Failed to read from the proc filesystem")] ProcFs,
-  #[error("A critical error occurred while trying to power down the system")] PowerCritical
-}
-
-// This stores an error (in kind) and an error trace/"context" (in trace)
-#[derive(PartialEq, Eq, Clone, Debug)]
-#[must_use]
-pub struct ErrorTrace
-{
-  kind: Error,
-  context: Option<String>,
-  trace: String
-}
-
-pub trait ErrorResult<OkType, ErrType> where ErrType: Display
-{
-  /**
-    * Convert an error to a trace without context
-    *
-    * # Errors
-    * - Data type contains an error (e.g. Result is Err(..))
-    */
-  fn into_trace(self, errorKind: Error) -> Result<OkType>;
-}
-
-// A traceless, unknown error is the default
-impl Default for ErrorTrace
-{
-  fn default() -> Self
+error! {
+  /*
+   * Error stores all possible errors that could be thrown
+   * Messages and whether the error should send you to an emergency shell
+   * or not are defined in the impl
+   */
+  #[derive(PartialEq, Eq, Clone, Copy, Debug, thiserror::Error, Default)]
+  #[must_use]
+  pub enum Error
   {
-    Error::default().trace("")
+    // A generic error- usually for very specific case errors & impossible situations
+    #[default]
+    #[error("An unknown error occurred")] Unknown,
+    // Errors when starting up the init system
+    #[error("kickit is already running!")] AlreadyRunning,
+    #[error("kickit must be ran as the init process")] NotInit,
+    #[error("Insufficient permissions: kickit can only be ran as root")] NotRoot,
+    // File-related errors i.e. can't access or permission denied
+    #[error("File or directory not found")] FileNotFound,
+    #[error("Failed to setup work directory")] RunFsFail,
+    #[error("Kernel command-line parameter not found")] Cmdline,
+    #[error("Invalid command-line parameter")] BadCmdline,
+    #[error("Failed to get the current system time")] Time,
+    // When data can't be represented as a UTF-8 string
+    #[error("Failed to format content in UTF-8")] Format,
+    // Target-related errors (see how they are used in `src/target.rs`)
+    #[error("Target not found, has it been created in the library folder?")] TargetNotFound,
+    #[error("A required value is missing in target configuration")] TargetMissingValue,
+    #[error("Failed to parse target configuration file")] TargetParse,
+    // Socket data input/output failure
+    #[error("Failed to start up a socket")] SocketStartup,
+    #[error("Socket read connection failure")] SocketIoRead,
+    #[error("Socket write connection failure")] SocketIoWrite,
+    #[error("Input/output connections failed on socket")] SocketIo,
+    // Service-related errors (used in `src/service.rs`)
+    #[error("Failed to parse service configuration file")] ServiceParse,
+    #[error("Failed to access a service's files")] ServiceAccess,
+    #[error("Failed to start a service")] ServiceUp,
+    #[error("Failed to stop a service")] ServiceDown,
+    #[error("Failed to start logger for a service")] ServiceLog,
+    #[error("Failed to read from the service's logger")] ServiceLogContent,
+    #[error("Failed to compress/decompress the service's logger")] ServiceLogCompress,
+    #[error("Service was killed or stopped")] ServiceNotRunning,
+    #[error("Service became a zombie")] ServiceZombified,
+    #[error("Invalid sandboxing option specified")] ServiceSandboxBadOpt,
+    #[error("Failed to initialise sandbox directory")] ServiceSandboxInit,
+    #[error("Failed to access a logfile")] AccessLog,
+    // Mount-related failures
+    #[error("Invalid formatted line in fstab")] FstabParse,
+    #[error("Failed to mount a critical filesystem")] SysFsMount,
+    #[error("Failed to unmount a filesystem")] SysFsUnmount,
+    // Pure init errors
+    #[error("Failed to shutdown the init system")] Shutdown,
+    #[error("Failed to read from the proc filesystem")] ProcFs,
+    #[error("A critical error occurred while trying to power down the system")] PowerCritical
   }
 }
 
@@ -161,7 +126,7 @@ impl ReturnError for Error
   }
   fn warn(self)
   {
-    warn!("{}", self.to_string());
+    warn!("{self}");
   }
 }
 
@@ -184,24 +149,6 @@ impl ReturnError for ErrorTrace
   }
 }
 
-// Strip a traceful error down to a traceless error
-impl From<ErrorTrace> for Error
-{
-  fn from(trace: ErrorTrace) -> Self
-  {
-    trace.kind
-  }
-}
-
-// ...and vice versa
-impl From<Error> for ErrorTrace
-{
-  fn from(kind: Error) -> Self
-  {
-    kind.trace("")
-  }
-}
-
 impl Error
 {
   fn exit(self) -> !
@@ -215,76 +162,6 @@ impl Error
     }
 
     process::exit(1);
-  }
-
-  pub fn trace(self, trace: impl Display) -> ErrorTrace
-  {
-    ErrorTrace { kind: self, context: None, trace: trace.to_string() }
-  }
-}
-
-impl ErrorTrace
-{
-  pub fn context(self, context: impl Display) -> Self
-  {
-    Self { kind: self.kind, context: Some(context.to_string()), trace: self.trace }
-  }
-}
-
-impl<OkType> ExtendWithContext<OkType, ErrorTrace> for Result<OkType>
-{
-  fn context(self, context: impl Display) -> Result<OkType>
-  {
-    match (self)
-    {
-      Ok(ok) => Ok(ok),
-      Err(error) => Err(
-      {
-        ErrorTrace {
-          kind: error.kind,
-          context: Some(context.to_string()),
-          trace: error.trace
-        }
-      })
-    }
-  }
-}
-
-impl<OkType, ErrType: Display> ErrorResult<OkType, ErrType> for StdResult<OkType, ErrType>
-{
-  fn into_trace(self, errorKind: Error) -> Result<OkType>
-  {
-    self.map_err(|e| errorKind.trace(&e))
-  }
-}
-
-impl<ErrType: Display> ErrorResult<(), ErrType> for Option<ErrType>
-{
-  fn into_trace(self, k: Error) -> Result<()>
-  {
-    if let Some(e) = self.map(|why| k.trace(&why))
-    {
-      Err(e)
-    }
-    else {
-      Ok(())
-    }
-  }
-}
-
-impl ErrorResult<(), String> for String
-{
-  fn into_trace(self, k: Error) -> Result<()>
-  {
-    Err(k.trace(&self))
-  }
-}
-
-impl ErrorResult<(), std::io::Error> for io::Error
-{
-  fn into_trace(self, k: Error) -> Result<()>
-  {
-    Err(k.trace(&self))
   }
 }
 

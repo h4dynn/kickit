@@ -5,8 +5,6 @@ use crate::{oncelock, init::console::Result, path, file_path};
 oncelock! {
   // Once the target is sourced its configuration will be stored here
   pub static TARGET: Target;
-  // Used to tell ktctl which target is active (in Core socket)
-  pub static TARGET_NAME: String;
 }
 
 // KTTargetSource is used for toml::from_str
@@ -14,22 +12,40 @@ oncelock! {
 struct TargetSource
 {
   pub services: Option<Vec<String>>,
-  pub log_level: Option<u8>,
   pub hostname: Option<String>,
   pub debug_dump: Option<bool>,
-  pub service_timeout: Option<u64>
+  pub service_timeout: Option<u64>,
+  pub service_tick_interval: Option<u64>
 }
 
 // The final returned target
-#[derive(PartialEq, Eq, Clone, Debug, Default)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Target
 {
+  // The name of the currently used target
   pub name: String,
+  // All the services that will be ran
   pub services: Vec<String>,
-  pub logLevel: u8,
+  // The system's hostname, will be localhost if not set
   pub hostname: String,
+  // Store kickit's run assets in permanent storage for debugging
   pub debugDump: bool,
-  pub serviceTimeout: u64
+  // How long we are willing to wait for a RunOnce service to start
+  pub serviceTimeout: u64,
+  /*
+   * How long we sleep for (in milliseconds) in the service's log watcher. A longer duration
+   * will lessen CPU usage, but make logging slower. A shorter duration will speed up logging
+   * at the expense of higher CPU usage (the default is 250ms, or 1/4th a second)
+   */
+  pub serviceTickInterval: u64
+}
+
+mod Defaults
+{
+  // Default options
+  pub const HOSTNAME: &str = "localhost";
+  pub const SERVICE_TIMEOUT_SEC: u64 = 5;
+  pub const SERVICE_TICK_INTERVAL_MILLIS: u64 = 100;
 }
 
 /**
@@ -41,7 +57,7 @@ pub struct Target
  **/
 pub fn source(name: String) -> Result<Target>
 {
-  use crate::{init::console::{Error, ErrorResult}};
+  use crate::{console::ErrorResult, init::console::Error};
   use std::fs;
 
   // Read toml contents from target config to string
@@ -54,10 +70,10 @@ pub fn source(name: String) -> Result<Target>
   let services = target.services.ok_or(Error::TargetMissingValue.trace(format!("services missing from {name}")))?;
 
   // Set our target values or the default if not specified in sourced config
-  let logLevel = target.log_level.unwrap_or(1);
-  let hostname = target.hostname.unwrap_or(String::from("localhost"));
-  let debugDump = target.debug_dump.unwrap_or(false);
-  let serviceTimeout = target.service_timeout.unwrap_or(5);
+  let hostname = target.hostname.unwrap_or(String::from(Defaults::HOSTNAME));
+  let debugDump = target.debug_dump.unwrap_or_default();
+  let serviceTimeout = target.service_timeout.unwrap_or(Defaults::SERVICE_TIMEOUT_SEC);
+  let serviceTickInterval = target.service_tick_interval.unwrap_or(Defaults::SERVICE_TICK_INTERVAL_MILLIS);
 
   if (target.debug_dump == Some(true) && !cfg!(debug_assertions))
   {
@@ -66,5 +82,5 @@ pub fn source(name: String) -> Result<Target>
     warn!("debug dump is enabled in target '{name}', but you are using a release build");
   }
 
-  Ok(Target { name, services, logLevel, hostname, debugDump, serviceTimeout })
+  Ok(Target { name, services, hostname, debugDump, serviceTimeout, serviceTickInterval })
 }
