@@ -7,15 +7,14 @@ oncelock! {
   pub static TARGET: Target;
 }
 
-// KTTargetSource is used for toml::from_str
+// Used for toml::from_str, the optional values have defaults to fallback to
 #[derive(serde::Deserialize, PartialEq, Eq, Clone, Debug)]
-struct TargetSource
+struct Config
 {
   pub services: Option<Vec<String>>,
   pub hostname: Option<String>,
   pub debug_dump: Option<bool>,
-  pub service_timeout: Option<u64>,
-  pub service_tick_interval: Option<u64>
+  pub service_timeout: Option<u64>
 }
 
 // The final returned target
@@ -31,13 +30,7 @@ pub struct Target
   // Store kickit's run assets in permanent storage for debugging
   pub debugDump: bool,
   // How long we are willing to wait for a RunOnce service to start
-  pub serviceTimeout: u64,
-  /*
-   * How long we sleep for (in milliseconds) in the service's log watcher. A longer duration
-   * will lessen CPU usage, but make logging slower. A shorter duration will speed up logging
-   * at the expense of higher CPU usage (the default is 250ms, or 1/4th a second)
-   */
-  pub serviceTickInterval: u64
+  pub serviceTimeout: u64
 }
 
 mod Defaults
@@ -45,7 +38,6 @@ mod Defaults
   // Default options
   pub const HOSTNAME: &str = "localhost";
   pub const SERVICE_TIMEOUT_SEC: u64 = 5;
-  pub const SERVICE_TICK_INTERVAL_MILLIS: u64 = 100;
 }
 
 /**
@@ -65,7 +57,7 @@ pub fn source(name: String) -> Result<Target>
                     .into_trace(Error::TargetNotFound)?;
 
   // Source the configuration
-  let target: TargetSource = toml::from_str(&targetToml).into_trace(Error::TargetParse)?;
+  let target: Config = toml::from_str(&targetToml).into_trace(Error::TargetParse)?;
 
   let services = target.services.ok_or(Error::TargetMissingValue.trace(format!("services missing from {name}")))?;
 
@@ -73,7 +65,6 @@ pub fn source(name: String) -> Result<Target>
   let hostname = target.hostname.unwrap_or(String::from(Defaults::HOSTNAME));
   let debugDump = target.debug_dump.unwrap_or_default();
   let serviceTimeout = target.service_timeout.unwrap_or(Defaults::SERVICE_TIMEOUT_SEC);
-  let serviceTickInterval = target.service_tick_interval.unwrap_or(Defaults::SERVICE_TICK_INTERVAL_MILLIS);
 
   if (target.debug_dump == Some(true) && !cfg!(debug_assertions))
   {
@@ -82,5 +73,5 @@ pub fn source(name: String) -> Result<Target>
     warn!("debug dump is enabled in target '{name}', but you are using a release build");
   }
 
-  Ok(Target { name, services, hostname, debugDump, serviceTimeout, serviceTickInterval })
+  Ok(Target { name, services, hostname, debugDump, serviceTimeout })
 }

@@ -1,7 +1,8 @@
 //! Socket implementations for init
 
 use tokio::net::UnixStream;
-use crate::{socket::{Socket, PeerError, Core, Log, Power}, console::{ErrorResult, ReturnError}, init::console::{Result, Error},
+use crate::{socket::{Socket, PeerError, Core, Log, Power},
+              console::{ErrorResult, ReturnError}, init::console::{Result, Error},
               console::{HandleError, ExtendWithContext}};
 
 /*
@@ -18,7 +19,7 @@ pub trait Open: Socket + Sync + 'static
       use std::{os::unix::fs::PermissionsExt, fs::{Permissions, set_permissions}};
       use tokio::{task, net::UnixSocket};
 
-      let mode = if (Self::PRIVATE) { 0o600 } else { 0o666 };
+      let mode = if Self::PRIVATE { 0o600 } else { 0o666 };
       let permissions = Permissions::from_mode(mode);
 
       let sock = UnixSocket::new_stream().into_trace(Error::SocketStartup)?;
@@ -50,37 +51,40 @@ macro_rules! socket_relay
 {
   // Provide the OK byte as well as our bytes
   ($stream: expr, Ok($ok: expr)) =>
-  {
-    {
-      socket_relay!(@write $stream, &[PeerError::IS_OK]);
-      socket_relay!(@write $stream, $ok);
-    }
-  };
+  {{
+    socket_relay!(@write $stream, &[PeerError::OK as u8]);
+    socket_relay!(@write $stream, $ok);
+  }};
   /*
    * Provide a failure byte to the socket peer as a signal that something
    * went wrong, shutdown the connection & then return, see `socket::PeerError`
    * for all possible errors
    */
   ($stream: expr, Err($error: path)) =>
-  {
-    {
-      // Write our "error byte" to signal to peer an error has occurred
-      $stream.try_write(&[PeerError::IS_ERROR, $error as u8]).into_trace(Error::SocketIoWrite).or_warn();
-      // Exit our function- do nothing more here
-      return
-    }
-  };
+  {{
+    // Write our "error byte" to signal to peer an error has occurred
+    $stream.try_write(&[PeerError::ERR, $error as u8]).into_trace(Error::SocketIoWrite).or_warn();
+    // Exit our function- do nothing more here
+    return
+  }};
   (@write $stream: expr, $bytes: expr) =>
   {
     if let Err(err) = $stream.try_write($bytes).into_trace(Error::SocketIoWrite)
     {
+      // TO-DO: Generally for debugging purposes only, so may fill up init logs if we're not careful
       err.warn();
+
       socket_relay!($stream, Err(PeerError::IoWrite))
     }
   };
 }
 pub use crate::socket_relay as relay;
 
+/*
+ * Make sure our stream is ready to be read from or written to, this is to
+ * avoid any ambigious errors when trying to read/write without checking
+ * first
+ */
 #[macro_export]
 macro_rules! stream_sanity
 {
@@ -88,14 +92,14 @@ macro_rules! stream_sanity
   {
     if ($stream.readable().await.is_err())
     {
-      relay!($stream, Err(PeerError::NotReadReady));
+      relay!($stream, Err(PeerError::NotReadReady))
     }
   };
   ($stream: expr => Writable) =>
   {
     if ($stream.writable().await.is_err())
     {
-      relay!($stream, Err(PeerError::NotWriteReady));
+      relay!($stream, Err(PeerError::NotWriteReady))
     }
   };
   ($stream: expr => Readable + Writable) =>
@@ -198,9 +202,8 @@ impl Socket for Power
     use crate::{console::ReturnError, TrashUnused, init::{PID, power::{poweroff, forcePoweroff, Mode}}};
 
     stream_sanity!(stream => Readable + Writable);
-    // Read 1 byte only
-    let mut input = [0u8];
 
+    let mut input = [0u8];
     if (stream.try_read(&mut input).is_err())
     {
       relay!(stream, Err(PeerError::IoRead));
@@ -212,23 +215,23 @@ impl Socket for Power
       Self::REBOOT => poweroff(Mode::Reboot).or_warn().trash(),
       Self::FORCE_SHUTDOWN =>
       {
-        if let Some(pid) = PID.get() && (pid.is_none())
+        if (PID.get().is_some_and(Option::is_none))
         {
           forcePoweroff(Mode::Shutdown).or_warn();
         }
         else {
-          Error::Shutdown.trace("Force shutdown is not supported when kickit is not ran as the init process!").warn();
+          Error::Shutdown.trace("Force shutdown is unsupported when kickit is not init!").warn();
           relay!(stream, Err(PeerError::Unsupported));
         }
       }
       Self::FORCE_REBOOT =>
       {
-        if let Some(pid) = PID.get() && (pid.is_none())
+        if (PID.get().is_some_and(Option::is_none))
         {
           forcePoweroff(Mode::Reboot).or_warn();
         }
         else {
-          Error::Shutdown.trace("Force reboot is not supported when kickit is not ran as the init process!").warn();
+          Error::Shutdown.trace("Force reboot is unsupported when kickit is not init!").warn();
           relay!(stream, Err(PeerError::Unsupported));
         }
       },

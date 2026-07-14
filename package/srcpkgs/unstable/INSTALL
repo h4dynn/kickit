@@ -1,0 +1,9 @@
+# Create the kickit-shell user, for emergency shells
+
+case "${ACTION}" in
+  post)
+  {
+    # The default UID will be 490 (0x49 = I for init)
+    useradd --system --no-create-home --no-user-group --uid 490 --shell /usr/bin/nologin kickit-shell
+  };;
+esac

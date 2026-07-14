@@ -15,45 +15,39 @@ pub mod console;
 pub mod state;
 pub mod socket;
 
-use std::{fmt::Display, iter::Iterator, ops::Deref};
+use std::{fmt::Display, iter::Iterator, collections::VecDeque, mem::MaybeUninit, ops::Deref};
 
-/*
- * This alias makes things alot less repetative, e.g.:
- *
- * `let myVeryImportByteData: Vec<u8> = Vec::new();`
- *
- * just becomes:
- *
- * `let myVeryImportByteData = Data::new();`
- */
 pub type Data = Vec<u8>;
+pub type DequeData = VecDeque<u8>;
+// A non-resizable String equivilant
+pub type BoxedStr = Box<str>;
 
 /*
- * A delimited vector iterator, which will iterate over each inner item with the delimiter
+ * A delimited iterator, which will iterate over each inner item with the delimiter
  * appended, except for the last item
  */
-#[derive(Clone,)]
-pub struct DelimVecIter<T: Display>
+#[derive(Clone)]
+pub struct DelimIter<T: Display, Inner: Iterator<Item = T>>
 {
-  delim: char,
-  // Where we are in the vector, make sure we don't go past its index max
-  current: usize,
-  vec: Vec<T>
+  // If we are on the 1st item, we don't want to print the delimiter.
+  first: bool,
+  delim: &'static str,
+  inner: Inner
 }
 
 #[cfg(feature = "stable")]
-pub const RELEASE: Release = Release::Stable;
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(not(feature = "stable"))]
-pub const RELEASE: Release = Release::Unstable;
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (unstable)");
 
 // Where the important files for kickit live
 pub const PREFIX: &str = "/usr/lib/kickit";
 
-#[derive(Eq, PartialEq, Copy, Clone, Debug, Default, derive_more::Display)]
-pub enum Release
+// This is just a nice way to do nothing with a value, equivilant to `let _ = fn();`
+pub trait TrashUnused
 {
-  Stable, Testing, #[default] Unstable
+  fn trash(&self) {}
 }
 
 // Convert a Vector that may be empty to an Option
@@ -62,152 +56,99 @@ pub trait OptionEmptyVec: Sized
   fn empty_none(self) -> Option<Self>;
 }
 
-// This is just a nice way to do nothing with a value
-pub trait TrashUnused: Sized
+/*
+ * Remove all of `SIZE` bytes from the front/back of the vector, moving them
+ * into an array. If you are dumping from the front, a `VecDeque` will be
+ * more suitable than a `Vec`, since it is double-ended.
+ *
+ * SAFETY: This doesn't check if your array is big enough to index through
+ * the length provided. You need to implement those checks yourself before
+ * using this!
+ */
+pub trait DumpVec<T>: Sized
 {
-  fn trash(self) {}
+  // Remove all of SIZE bytes from the front of the vector
+  fn dump_front<const SIZE: usize>(&mut self) -> [T; SIZE];
 }
 
-pub trait DumpVec: Sized
+pub fn delim_iter<T: Display, I: Iterator<Item = T>>(inner: I, delim: &'static str) -> DelimIter<T, I>
 {
-  /*
-   * Remove all of `SIZE` bytes from the front of the vector, moving them into
-   * an array
-   *
-   * SAFETY: This doesn't check if your array is big enough to index through
-   * the length provided. You need to implement those checks yourself before
-   * using this!
-   */
-  fn front_dump<const SIZE: usize>(&mut self) -> [u8; SIZE];
-  // Same as the above but move from the end of the vector
-  fn back_dump<const SIZE: usize>(&mut self) -> [u8; SIZE];
+  DelimIter { delim, inner, first: true }
 }
 
-#[must_use]
-pub fn version() -> String
+impl<T: Display, Inner: Iterator<Item = T>> Iterator for DelimIter<T, Inner>
 {
-  use crate::{tern, Release::Stable};
+  type Item = String;
 
-  [
-    // Display version as a string
-    env!("CARGO_PKG_VERSION").to_owned(),
-    tern! {
-      crate::RELEASE == Stable => String::new(),
-      else => format!(" ({})", crate::RELEASE)
+  fn next(&mut self) -> Option<String>
+  {
+    let current = self.inner.next()?;
+
+    if (self.first)
+    {
+      self.first = false;
+      // No formatting needed here!
+      Some(current.to_string())
     }
-  ]
-    // And join both of those together without a seperator
-    .join("")
+    else {
+      Some(format!("{}{}", self.delim, current))
+    }
+  }
 }
 
 impl<T, S: Deref<Target = Vec<T>>> OptionEmptyVec for S
 {
   fn empty_none(self) -> Option<Self>
   {
-    tern! {
-      (*self).is_empty() => None,
-      else => Some(self)
-    }
-  }
-}
-
-impl<T: Display> Iterator for DelimVecIter<T>
-{
-  type Item = String;
-
-  fn next(&mut self) -> Option<String>
-  {
-    let reply =
-    {
-      match (self.current)
-      {
-        // This is the last item in the vector, so don't append the delimiter
-        end if (end == self.vec.len() - 1) => Some(self.vec[self.current].to_string()),
-        // Reached the end of the vector
-        overflow if (overflow >= self.vec.len()) => None,
-        // This is a regular item, append the delimiter
-        _ => Some(format!("{}{}", self.vec[self.current], self.delim))
-      }
-    };
-
-    // Move onto the next
-    self.current += 1;
-    reply
-  }
-}
-
-impl<T: Display> DelimVecIter<T>
-{
-  #[must_use]
-  pub const fn new(vec: Vec<T>, delim: char) -> Self
-  {
-    Self { delim, current: 0, vec }
+    tern! { (*self).is_empty() => None, _ => Some(self) }
   }
 }
 
 // A VecDeque is the way to go for this, since they are designed to be able to remove from the front
-impl DumpVec for std::collections::VecDeque<u8>
+impl<T> DumpVec<T> for VecDeque<T>
 {
-  fn front_dump<const SIZE: usize>(&mut self) -> [u8; SIZE]
+  /*
+   * We use a `MaybeUninit` here since we COULD just use a `[T; SIZE]`, depend on T implementing
+   * Default and use the default value but that's creates unnecessary initialisations + adds an
+   * extra unneeded dependency
+   *
+   * Usage:
+   * ```
+   *   let mut abcdef = VecDeque::from(['a', 'b', 'c', 'd', 'e', 'f']);
+   *   // Dump a, b and c only into an array
+   *   let abc: [char; 3] = abcdef.dump_front();
+   *
+   *   assert_eq!(abc, ['a', 'b', 'c']);
+   *   assert_eq!(abcdef.as_slice(), &['d', 'e', 'f']);
+   * ```
+   */
+  fn dump_front<const SIZE: usize>(&mut self) -> [T; SIZE]
   {
-    let mut dump = [0u8; SIZE];
+    // All values in here are guaranteed to become initialised by the for loop
+    let mut dump: [MaybeUninit<T>; SIZE] = [const { MaybeUninit::uninit() }; SIZE];
 
+    // Index through each position, which causes a panic if there's not enough in the vector
     for index in (&mut dump)
     {
-      *index = self.pop_front().unwrap();
+      // Move out the value from the front of the vector over to the array
+      index.write(self.pop_front().unwrap());
     }
 
-    dump
-  }
-
-  fn back_dump<const SIZE: usize>(&mut self) -> [u8; SIZE]
-  {
-    let mut dump = [0u8; SIZE];
-
-    for index in (&mut dump)
-    {
-      *index = self.pop_back().unwrap();
-    }
-
-    dump
+    /*
+     * We unfortunately cannot `transmute()` here since it doesn't accept generics, so
+     * we gotta rely on pointers instead <https://github.com/rust-lang/rust/issues/61956>
+     */
+    unsafe { dump.as_ptr().cast::<[T; SIZE]>().read() } //unsafe { transmute::<_, [T; SIZE]>(dump) }
   }
 }
 
-impl DumpVec for Vec<u8>
-{
-  fn front_dump<const SIZE: usize>(&mut self) -> [u8; SIZE]
-  {
-    let mut dump = [0u8; SIZE];
-
-    for index in (&mut dump)
-    {
-      *index = self.remove(0);
-    }
-
-    dump
-  }
-
-  fn back_dump<const SIZE: usize>(&mut self) -> [u8; SIZE]
-  {
-    let mut dump = [0u8; SIZE];
-
-    for index in (&mut dump)
-    {
-      *index = self.pop().unwrap();
-    }
-
-    dump
-  }
-}
-
-impl<S: Sized> TrashUnused for S {}
+impl<S> TrashUnused for S {}
 
 // Get the name of the current binary (e.g. ktctl)
 #[macro_export]
 macro_rules! binary
 {
-  () =>
-  {
+  () => {
     {
       use std::env::current_exe;
 
@@ -229,11 +170,10 @@ macro_rules! binary
 macro_rules! wrap
 {
   {
-    $(impl $(<$($gen: ident: $($dep: ident),*),*>)? Deref<Target = $inner: ty> for $name: ident;)+
-  } =>
-  {
+    $(impl $(<$($gen: ident $(: $($dep: path),*)?),*>)? Deref<Target = $inner: ty> for $name: ident;)+
+  } => {
     $(
-      impl $(<$($gen: $($dep),+),+>)? std::ops::Deref for $name $(<$($gen),+>)?
+      impl $(<$($gen $(: $($dep),+)?),+>)? std::ops::Deref for $name $(<$($gen),+>)?
       {
         type Target = $inner;
         // The compiler will automatically handle proper dereferencing after this
@@ -243,7 +183,7 @@ macro_rules! wrap
         }
       }
       // and then we implement derefencing as mutable too!
-      impl $(<$($gen: $($dep),+),+>)? std::ops::DerefMut for $name $(<$($gen),+>)?
+      impl $(<$($gen $(: $($dep),+)?),+>)? std::ops::DerefMut for $name $(<$($gen),+>)?
       {
         fn deref_mut(&mut self) -> &mut $inner
         {
@@ -276,8 +216,12 @@ macro_rules! path
   ($($sub: expr),*) =>
   {
     {
-      let mut tempPath = std::path::PathBuf::new();
-      $(tempPath.push($sub);)*
+      use std::path::PathBuf;
+      let mut tempPath = PathBuf::new();
+
+      $(
+        tempPath.push($sub);
+      )*
       tempPath
     }
   };
@@ -330,8 +274,7 @@ macro_rules! oncelock
     $(
       $vis: vis static $name: ident: $ty: ty;
     )+
-  } =>
-  {
+  } => {
     $(
       $vis static $name: std::sync::OnceLock<$ty> = std::sync::OnceLock::new();
     )+
@@ -384,25 +327,50 @@ macro_rules! oncelock
   };
 }
 
+// Get an enum's variant from its string form
+#[macro_export]
+macro_rules! enum_from_str
+{
+  ($str: expr => $($variant: ident)|*) =>
+  {
+    match ($str)
+    {
+      $(
+        stringify!($variant) => Some(Self::$variant),
+      )*
+      _ => None
+    }
+  };
+}
+
 // A C-style ternary expression with different syntax due to Rust macro fragments (? can't come after expr)
 #[macro_export]
 macro_rules! tern
 {
-  { $eval: expr => $cond: expr, $($eeval: expr => $econd: expr,)* else => $fallback: expr } =>
+  { $eval: expr => $cond: expr, _ => $fallback: expr } =>
   {
     if ($eval)
     {
       $cond
     }
-    $(
-      else if ($eeval)
-      {
-        $econd
-      }
-    )*
     else {
       $fallback
     }
+  };
+  { $firstEval: expr => $firstCond: expr, $($eval: expr => $cond: expr),* } =>
+  {
+    if ($firstEval)
+    {
+      Some($firstCond)
+    }
+    $(else if ($eval)
+    {
+      Some($cond)
+    })*
+    else {
+      None
+    }
+      .unwrap_or_default()
   };
 }
 

@@ -12,32 +12,33 @@
 - [x] Add option to create directories in /run for
       services
 
+- [ ] Sandbox's `NewUser` flag needs uid/gid map
+      implementation to work properly
+
 - [ ] Using sandbox on services fills up mount entries in
       /proc/mounts which is ugly, perhaps there's some way
       to stop this (how does bubblewrap do it?)
 
-- [ ] Require root login for emergency shell for
-      security
-
-- [ ] ~~Actually enforce `target.log_level`~~
+- [x] ~~Require root login for emergency shell for
+      security~~ Drop users to an unprivileged shell by
+      default on emergencies
 
 - [x] Cleanup errors for ktctl & init binaries
 
-- [ ] Add partial compatibility with `systemd`
-      (programs that depend on systemd)
+- [ ] ~~Actually enforce `target.log_level`~~
 
 # ktctl
 
 - [x] Properly implement /run/kickit/io.Core input/output
 
-- [ ] Add option to restart services
-
 - [x] Implement way to access init master log
 
-- [ ] Improve slightly messy/clumsy code
+- [x] Improve slightly messy/clumsy code
+
+- [ ] ~~Add option to restart services~~
 
 # Documentation
 
-- [ ] Add info on actually installing it
+- [x] Add info on actually installing it
 
 - [ ] Add info for contributors/devs

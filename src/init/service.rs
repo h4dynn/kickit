@@ -1,29 +1,30 @@
 //! Service implementation
 
-use std::{fs, path::{Path, PathBuf}, boxed::Box, collections::VecDeque, fmt, io,
-            process::{Command, Child, ExitStatus}, sync::OnceLock};
 use serde::Deserialize;
 use super::{target::TARGET, console::{Error, Result}};
-use crate::{console::{guard, ExtendWithContext, ErrorResult}, file_path, path, oncelock};
+use crate::{PREFIX, BoxedStr, console::{guard, ExtendWithContext, ErrorResult}, file_path, path, oncelock};
+use std::{fs, path::{Path, PathBuf}, collections::VecDeque, fmt, io, sync::{Arc, OnceLock},
+            process::{Command, Child, ExitStatus}};
 
 oncelock! {
   // Standard services with name & pids, accessed when shutting down
-  pub static SERVICES: Vec<(Box<str>, u32)>;
+  pub static STANDARD_SERVICES: Vec<Service>;
 }
-
-pub const INIT_LOG_ENTRY: u8 = 0x8f;
 
 // The service body which is generated from the init() method
 #[derive(Debug)]
 pub struct Service
 {
-  pub name: Box<str>,
+  // This will shared across threads, so an Arc is most suitable
+  pub name: Arc<BoxedStr>,
   // Optional services won't cause an init error if they exit/fail
   pub optional: bool,
   // See `Pattern` enum for more info
   pub pattern: Pattern,
   // Do we want a logger on this service?
   pub logger: bool,
+  // Process's ID, set only after `up()` is called
+  pub pid: OnceLock<u32>,
   // Print log entries to the init's console
   shout: bool,
   // Launch with the `warden` namespace sandboxer
@@ -31,7 +32,7 @@ pub struct Service
   // Create a run folder for this service
   runFolder: Option<RunDirectory>,
   // Executable + optional arguments
-  exec: VecDeque<Box<str>>,
+  exec: VecDeque<BoxedStr>,
   // Automatically set options by service manager
   state: State,
   // The spawned child of this process, set only after `up()` is called
@@ -40,10 +41,16 @@ pub struct Service
   log: OnceLock<Logger>
 }
 
+pub struct Supervisor
+{
+  name: Arc<BoxedStr>,
+  process: Child
+}
+
 #[derive(Debug)]
 pub struct Logger
 {
-  name: Box<str>,
+  name: Arc<BoxedStr>,
   shout: bool,
   // The current line count
   line: usize,
@@ -53,19 +60,28 @@ pub struct Logger
   reader: Option<io::PipeReader>
 }
 
-#[derive(Clone, PartialEq, Eq, Deserialize, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum LogEntry<'entry>
+{
+  // Regular entry from service's stderr & stdout PipeReader
+  Service(&'entry str),
+  // Special entry from init
+  Init(&'entry str)
+}
+
+#[derive(PartialEq, Eq, Clone, Deserialize, Debug)]
 pub struct Sandbox
 {
-  // List of all the flags in string form, such as "share_vm" or "new_user"
-  flags: Vec<Box<str>>,
+  // List of all the flags in string form, such as "ShareVm" or "NewUser"
+  flags: Vec<BoxedStr>,
   // What binaries this container will be using
-  import: Vec<Box<str>>,
+  import: Vec<BoxedStr>,
   // Bind mount the system pseudo filesystems, required for majority of services
   bindSystemFs: Option<bool>,
   // Bind mount the dbus socket, some services like lightdm or elogind will need this
   bindDbus: Option<bool>,
   // Share the provided sandboxed files with the rest of the OS via bind mount
-  files: Option<Box<str>>
+  files: Option<BoxedStr>
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
@@ -108,39 +124,29 @@ struct RunDirectory
 #[derive(Deserialize, PartialEq, Eq, Clone, Debug)]
 struct Config
 {
-  description: Option<Box<str>>,
+  description: Option<BoxedStr>,
   optional: Option<bool>,
   shout: Option<bool>,
   pattern: Option<Pattern>,
   logger: Option<bool>,
   run_folder: Option<RunDirectory>,
   sandbox: Option<Sandbox>,
-  exec: VecDeque<Box<str>>
+  exec: VecDeque<BoxedStr>
 }
 
 impl Service
 {
-  fn run_path(&self, of: impl fmt::Display) -> String
+  fn run_path(&self, of: impl fmt::Display) -> PathBuf
   {
-    format!("/run/kickit/service/{}/{of}", &self.name)
-  }
-
-  // These methods allow for moving out but not changing/modifying while still in struct
-  pub fn process(&mut self) -> Option<Child>
-  {
-    self.process.take()
-  }
-  pub fn logger(&mut self) -> Option<Logger>
-  {
-    self.log.take()
+    PathBuf::from(format!("/run/kickit/service/{}/{of}", &self.name))
   }
 
   /**
     * # Errors
     *
-    * * Service's configuration doesn't exist or can't be read
-    * * Service's configuration couldn't be parsed by toml
-    * * Service's provided executable doesn't exist
+    * - Service's configuration doesn't exist or can't be read
+    * - Service's configuration couldn't be parsed by toml
+    * - Service's provided executable doesn't exist
     */
   // Source the service and nothing else
   pub fn init(name: impl AsRef<str>) -> Result<Self>
@@ -156,7 +162,7 @@ impl Service
       };
     }
 
-    let path = file_path!(path!(crate::PREFIX, "service"), name.as_ref(), "toml");
+    let path = file_path!(path!(PREFIX, "service"), name.as_ref(), "toml");
 
     // Make sure the configuration file exists
     guard!(!path.is_file() => Error::FileNotFound.trace(format!("{}: Service not found", name.as_ref())));
@@ -177,20 +183,22 @@ impl Service
     let logger = config.logger.unwrap_or(true);
 
     Ok(Self {
-      name: name.as_ref().into(), optional, shout,
+      name: Arc::new(name.as_ref().into()), optional, shout,
       sandbox: config.sandbox, runFolder: config.run_folder,
       pattern, logger, exec: config.exec, state: Down,
-      process: OnceLock::new(), log: OnceLock::new()
+      process: OnceLock::new(), log: OnceLock::new(),
+      pid: OnceLock::new()
     })
   }
 
   // Convert provided args to executable & arguments based on service options
-  fn args(&mut self) -> Result<(PathBuf, VecDeque<Box<str>>)>
+  fn args(&mut self) -> Result<(PathBuf, VecDeque<BoxedStr>)>
   {
     use std::mem::take;
 
     // Take the old contents of the vector, and replace `self.exec` with an empty vector
     let mut serviceArgs = take(&mut self.exec);
+
     /*
      * Convert the sandbox options into arguments for warden to then handle.
      * The reason why we don't just start the sandbox from here is because using
@@ -199,14 +207,14 @@ impl Service
      */
     if let Some(sandboxOptions) = self.sandbox.take()
     {
-      let mut args = VecDeque::<Box<str>>::new();
+      let mut args = VecDeque::<BoxedStr>::new();
       // Setup the container rootfs
       sandboxOptions.setup(self.run_path("container"))?;
 
-      let exec = PathBuf::from("/usr/lib/kickit/warden");
+      let exec = path!(PREFIX, "warden");
 
       // Add the generated arguments from our options
-      args.extend(sandboxOptions.wardenArgs(self.run_path("container").into(), &mut serviceArgs)?);
+      args.extend(sandboxOptions.wardenArgs(self.run_path("container").display().to_string().into(), &mut serviceArgs)?);
 
       Ok((exec, args))
     }
@@ -226,22 +234,21 @@ impl Service
    */
   fn cache(mut cache: impl io::Write, pattern: Pattern, sandboxed: bool, state: State, pid: u32) -> Result<()>
   {
-    cache.write(&[pattern as u8]).into_trace(Error::ServiceAccess)?;
-    cache.write(&[sandboxed.into()]).into_trace(Error::ServiceAccess)?;
+    cache.write_all(&[pattern as u8, sandboxed.into()]).into_trace(Error::ServiceAccess)?;
+    // u32 in LE bytes will be 4 bytes long
+    cache.write_all(&pid.to_le_bytes()).into_trace(Error::ServiceAccess)?;
 
-    if let Some(intState) = &<State as Into<Option<i32>>>::into(state)
+    if let Some(intState) = &<Option<i32> as From<State>>::from(state)
     {
       // 0x01 indicates we have a status available - 0x00 indicates none available
-      cache.write(&[1]).into_trace(Error::ServiceAccess)?;
+      cache.write_all(&[1]).into_trace(Error::ServiceAccess)?;
       // This will be 4 bytes long
-      cache.write(&intState.to_le_bytes()).into_trace(Error::ServiceAccess)?;
+      cache.write_all(&intState.to_le_bytes()).into_trace(Error::ServiceAccess)?;
     }
     else {
       // Write all null bytes as padding to keep the length the same
-      cache.write(&[0; 5]).into_trace(Error::ServiceAccess)?;
+      cache.write_all(&[0; 5]).into_trace(Error::ServiceAccess)?;
     }
-    // u32 in LE bytes will be 4 bytes long
-    cache.write(&pid.to_le_bytes()).into_trace(Error::ServiceAccess)?;
 
     Ok(())
   }
@@ -249,8 +256,12 @@ impl Service
   /**
     * # Errors
     *
-    * * Service is already running
-    * * Couldn't spawn or start a process for the service
+    * - Service is already running
+    * - Couldn't spawn or start a process for the service
+    *
+    * # Panics
+    *
+    * - Failed to read from `std::io::Lines` iterator (error in `std::io::BufRead::read_line`)
     */
   #[inline]
   pub async fn up(&mut self) -> Result<()>
@@ -283,7 +294,7 @@ impl Service
        */
       logFile.write_all(&EMPTY_ZSTD).into_trace(Error::ServiceAccess)?;
 
-      if (self.log.set(Logger::new(self.name.clone(), self.shout, logFile)).is_err())
+      if (self.log.set(Logger::new(Arc::clone(&self.name), self.shout, logFile)).is_err())
       {
         return Err(Error::Unknown.trace(format!("Failed to set logger for {}", self.name)))
       }
@@ -328,9 +339,10 @@ impl Service
                         .spawn()
                         .into_trace(Error::ServiceUp).context(&self.name)?;
 
+        self.pid.set(process.id()).map_err(|_| Error::Unknown.trace(format!("Failed to set PID for {}", self.name)))?;
+
         // Transfer the process to our service
-        guard!(self.process.set(process).is_err() =>
-                  Error::Unknown.trace(format!("Failed to set process for {}", self.name)));
+        self.process.set(process).map_err(|_| Error::Unknown.trace(format!("Failed to set process for {}", self.name)))?;
 
         if (self.logger)
         {
@@ -340,7 +352,7 @@ impl Service
         }
 
         // hooray!
-        self.log("Started service", true)?;
+        self.log(&LogEntry::Init("Started service"))?;
         self.state = Up;
       },
       RunOnce =>
@@ -365,6 +377,7 @@ impl Service
 
             if (!status.success())
             {
+              dbg!(BufReader::new(reader).lines().map(|x| x.unwrap()).collect::<Vec<String>>());
               return Err(Error::ServiceUp.trace(format!("{} exited on error ({})", &self.name, status)))
             }
           },
@@ -377,7 +390,7 @@ impl Service
         for maybeLine in (BufReader::new(reader).lines())
         {
           let line = maybeLine.into_trace(Error::Format).context(&self.name)?;
-          self.log(&line, false)?;
+          self.log(&LogEntry::Service(&line))?;
         }
 
         if let Some(log) = self.log.get_mut()
@@ -385,7 +398,7 @@ impl Service
           // Make logfile read-only as the process has finished
           log.file.set_permissions(Permissions::from_mode(0o400)).into_trace(Error::ServiceAccess)?;
         }
-        self.log("Service finished successfully", true)?;
+        self.log(&LogEntry::Init("Service finished successfully"))?;
         // done!!!!!!!!!!!!!!!!!!!!!!!!!
       }
     }
@@ -399,83 +412,94 @@ impl Service
   /**
     * # Errors
     *
-    * * Service process exited on a code (even if the code is 0),
-    * * Failed to wait for the process
+    * - Service is already down,
+    * - Service's process hasn't been moved out (supervisor is not running, which it should be),
+    * - Failed to get the PID of the service (see `Service::pid`),
+    * - Failed to kill the service (see `nix::sys::signal::kill`)
     */
-  pub fn supervise(rawName: impl AsRef<str>, mut process: Child) -> Result<()>
+  // Kill a service - used when powering off
+  pub fn down(&self) -> Result<()>
   {
-    use super::power::POWER_OFF_READY;
+    use crate::{init::console::warn, console::{Colour, HandleError}};
+    use nix::{unistd::Pid, sys::signal::{kill, Signal}, errno::Errno};
 
-    let name = rawName.as_ref();
-    /*
-     * Make sure if we receive an error, but the init system has been told to
-     * power-off, that we don't actually return the error, as a service being
-     * killed during power-off is normal behavior
-     */
-    macro_rules! err
+    guard!(self.state != Up => Error::ServiceDown.trace("Cannot kill a service that isn't alive!"));
+    // Process should have been moved out to the supervisor at this point
+    guard!(self.process.get().is_some() => Error::ServiceDown.trace("Service is not ready to be killed"));
+
+    // nix wants a signed integer for some reason?
+    let pid: i32 = self.pid()?.cast_signed();
+
+    // First try killing with SIGQUIT
+    match (kill(Pid::from_raw(pid), Some(Signal::SIGQUIT)))
     {
-      ($error: expr) =>
+      Ok(..) => (),
+      // Process is already dead, no need to kill it
+      Err(Errno::ESRCH) => warn!("Service is already down"),
+      Err(err) =>
       {
-        if (POWER_OFF_READY.get() == Some(&true))
-        {
-          // Don't trigger an error if powering off - we want the service to be killed
-          Ok(())
-        }
-        else {
-          Err($error)
-        }
+        warn!("Failed to kill service, so we will force kill it: {err}");
+        // If that doesn't work we use SIGKILL, and if that doesn't work we can't do anything but warn really
+        kill(Pid::from_raw(pid), Some(Signal::SIGKILL)).into_trace(Error::Unknown).or_warn();
       }
     }
 
-    match (process.wait())
-    {
-      // Service has exited normally on a code
-      Ok(status) =>
-      {
-        err!(Error::ServiceDown.trace(if let Some(code) = status.code()
-        {
-          format!("Service {name} has died: {code}")
-        }
-        else {
-          format!("Service {name} has died: code is unavailable!")
-        }))
-      },
-      // Even the watcher has failed for some reason
-      Err(error) => err!(Error::ServiceDown.trace(error).context(name))
-    }
+    Ok(())
   }
 
   /**
     * # Errors
     *
-    * * Service does not have a logger available (this will only happen if the service
+    * - Logger has already been taken or is missing
+    */
+  // WARNING: This method will take ownership of the logger from the service, replacing it to be unset
+  pub fn logger(&mut self) -> Result<Logger>
+  {
+    self.log.take().ok_or(Error::Unknown.trace(format!("{}: Logger missing!", &self.name)))
+  }
+
+  /**
+    * # Errors
+    *
+    * - Process has already been taken or is missing
+    */
+  // WARNING: This method will take ownership of the process
+  pub fn supervisor(&mut self) -> Result<Supervisor>
+  {
+    let name = Arc::clone(&self.name);
+    let process = self.process.take().ok_or(Error::ServiceAccess.trace(format!("Failed to transfer service's process: {name}")))?;
+
+    Ok(Supervisor { name, process })
+  }
+
+  /**
+    * # Errors
+    *
+    * - Service does not have a logger available (this will only happen if the service
     *   hasn't been started)
     */
-  pub fn log(&mut self, new: &str, fromInit: bool) -> Result<()>
+  pub fn log(&mut self, entry: &LogEntry<'_>) -> Result<()>
   {
+    let (new, fromInit) = match (entry)
+    {
+      LogEntry::Init(new) => (new, true),
+      LogEntry::Service(new) => (new, false)
+    };
+
     oncelock!(&mut self.log)?.log(new, fromInit)
   }
 
   /**
     * # Errors
-    * * Service isn't running
-    * * Service has a `RunOnce` pattern
-    * * Service's process couldn't be found
+    *
+    * - Service isn't running
+    * - Service has a `RunOnce` pattern
+    * - Service's process couldn't be found
     */
   pub fn pid(&self) -> Result<u32>
   {
     guard!(self.state == Down => Error::ServiceAccess.trace("Service is down, cannot get PID"));
-
-    if let Dead(status) = self.state && let Some(code) = status.code()
-    {
-      return Ok(code.cast_unsigned())
-    }
-
-    match (self.process.get())
-    {
-      Some(i) => Ok(i.id()),
-      None => Err(Error::ServiceAccess.into())
-    }
+    oncelock!(&self.pid).map(|pid| *pid)
   }
 }
 
@@ -484,9 +508,9 @@ impl Sandbox
   /**
     * # Errors
     *
-    * * Failed to create a required system directory in the container (e.g. etc, usr, sys, dev, proc),
-    * * Failed to change directory to the container for whatever reason,
-    * * Failed to create a required symlink (e.g. bin -> usr/bin)
+    * - Failed to create a required system directory in the container (e.g. etc, usr, sys, dev, proc),
+    * - Failed to change directory to the container for whatever reason,
+    * - Failed to create a required symlink (e.g. bin -> usr/bin)
     */
   // Create the container rootfs, with bind mounts
   pub fn setup(&self, containerPath: impl AsRef<Path>) -> Result<()>
@@ -533,27 +557,27 @@ impl Sandbox
     Ok(())
   }
 
-  fn wardenArgs(mut self, container: Box<str>, cmdArgs: &mut VecDeque<Box<str>>) -> Result<Vec<Box<str>>>
+  fn wardenArgs(mut self, container: BoxedStr, args: &mut VecDeque<BoxedStr>) -> Result<Vec<BoxedStr>>
   {
     use std::{path::Path, mem::take};
 
-    let mut args = Vec::<Box<str>>::new();
+    let mut out = Vec::<BoxedStr>::new();
 
     // Vast majority of services will require this
     if (self.bindSystemFs.unwrap_or_default())
     {
-      args.push(Box::<str>::from("--mount-system-fs"));
+      out.push(BoxedStr::from("--mount-system-fs"));
     }
     // For services such as elogind or lightdm which use the dbus daemon
     if (self.bindDbus.unwrap_or_default())
     {
-      args.push(Box::<str>::from("--dbus"));
+      out.push(BoxedStr::from("--dbus"));
     }
 
-    // We can take the flags here because we know they won't be used for anything else
+    // We can take the s here because we know they won't be used for anything else
     for flag in (take(&mut self.flags))
     {
-      args.extend([Box::<str>::from("--flag"), flag]);
+      out.extend([BoxedStr::from("--flag"), flag]);
     }
 
     for bind in (&self.import)
@@ -563,36 +587,89 @@ impl Sandbox
       // Binding directories & files have different implementation due to creating parent dirs/files
       if (file.is_dir())
       {
-        args.push(Box::<str>::from("--bind-dir"));
+        out.push(BoxedStr::from("--bind-dir"));
       }
       else if (file.is_file())
       {
-        args.push(Box::<str>::from("--bind-file"));
+        out.push(BoxedStr::from("--bind-file"));
       }
       else {
         return Err(Error::ServiceSandboxInit.trace(format!("No such file or directory: {bind}")))
       }
 
-      args.push(bind.to_owned());
+      out.push(bind.to_owned());
     }
 
-    let exec = cmdArgs.pop_front().ok_or(Error::ServiceSandboxInit.trace("No executable in args"))?;
+    let exec = args.pop_front().ok_or(Error::ServiceSandboxInit.trace("No executable in args"))?;
 
     // Tell warden where our root container is
-    args.push(container);
+    out.push(container);
     // This is the executable that warden will run
-    args.push(exec);
+    out.push(exec);
     // `.make_contiguous()` moves all the items at the end of this deque to the front
-    args.extend_from_slice(cmdArgs.make_contiguous());
+    out.extend_from_slice(args.make_contiguous());
 
-    Ok(args)
+    Ok(out)
+  }
+}
+
+impl Supervisor
+{
+  /**
+    * # Errors
+    *
+    * - Service process exited on a code (even if the code is 0),
+    * - Failed to wait for the process
+    */
+  pub fn supervise(&mut self) -> Result<()>
+  {
+    use super::power::POWER_OFF_READY;
+
+    /*
+     * Make sure if we receive an error, but the init system has been told to
+     * power-off, that we don't actually return the error, as a service being
+     * killed during power-off is normal behavior
+     */
+    macro_rules! err
+    {
+      ($error: expr) =>
+      {
+        if (POWER_OFF_READY.get().is_some_and(|ready| *ready))
+        {
+          // Don't trigger an error if powering off - we want the service to be killed
+          Ok(())
+        }
+        else {
+          Err($error)
+        }
+      }
+    }
+
+    match (self.process.wait())
+    {
+      // Service has exited normally on a code
+      Ok(status) =>
+      {
+        err!(Error::ServiceDown.trace(if let Some(code) = status.code()
+        {
+          format!("Service {} has died: {code}", self.name.as_ref())
+        }
+        else {
+          format!("Service {} has died: code is unavailable!", self.name.as_ref())
+        }))
+      },
+      // Even the watcher has failed for some reason
+      Err(error) => err!(Error::ServiceDown.trace(error).context(self.name.as_ref()))
+    }
   }
 }
 
 impl Logger
 {
+  pub const INIT_ENTRY: u8 = 0x8f;
+
   #[must_use]
-  pub const fn new(name: Box<str>, shout: bool, file: fs::File) -> Self
+  pub const fn new(name: Arc<BoxedStr>, shout: bool, file: fs::File) -> Self
   {
     Self { name, shout, line: 0, file, reader: None }
   }
@@ -601,15 +678,14 @@ impl Logger
   /**
     * # Errors
     *
-    * * Logger doesn't have a reader (this will only happen for services with a `RunOnce` pattern),
-    * * Failed to read bytes from the reader,
-    * * Failed to add new line to the log (in `self.log(_, _)`)
+    * - Logger doesn't have a reader (this will only happen for services with a `RunOnce` pattern),
+    * - Failed to read bytes from the reader,
+    * - Failed to add new line to the log (in `self.log(_, _)`)
     */
   pub fn watch(&mut self) -> Result<()>
   {
-    use std::{thread::sleep, time::Duration, io::{BufRead, BufReader}, mem::take};
+    use std::{io::{BufRead, BufReader}, mem::take};
 
-    let interval = Duration::from_millis(oncelock!(&TARGET)?.serviceTickInterval);
     // Using BufReader for this kind of thing is just more efficient (thanks clippy!)
     let mut logReader = BufReader::new(self.reader.take().ok_or(Error::Unknown.trace("Logger missing!"))?);
 
@@ -617,12 +693,6 @@ impl Logger
     let mut content = Vec::new();
 
     loop {
-      /*
-       * Wait for the provided time for each loop iteration (default is 100ms, so 1/10th a second),
-       * without this we would use alot of CPU %
-       */
-      sleep(interval);
-
       // Read until a newline which is our EOF
       logReader.read_until(b'\n', &mut content).into_trace(Error::ServiceLogContent)?;
       // Convert from raw UTF-8 bytes to a string
@@ -640,14 +710,17 @@ impl Logger
     * Append a new line to the log
     *
     * # Errors
-    * * Couldn't open the service's logfile
-    * * Couldn't compress or decompress the service's logfile
-    * * Couldn't open a lock on the file (or unlock)
-    * * Couldn't write to the logfile
+    *
+    * - Couldn't open the service's logfile
+    * - Couldn't compress or decompress the service's logfile
+    * - Couldn't open a lock on the file (or unlock)
+    * - Couldn't write to the logfile
     *
     * # Panics
-    * * More than one line was provided to the function
+    *
+    * - More than one line was provided to the function
     */
+  // TO-DO: current method is to decompress & then recompress, which is kinda inefficient
   pub fn log(&mut self, new: &str, fromInit: bool) -> Result<()>
   {
     use std::{io::{Read, Seek, Cursor}, time::{SystemTime, UNIX_EPOCH}};
@@ -677,14 +750,12 @@ impl Logger
     // This is the zstd decoder which wraps over the file & implements Read
     let mut decoder = StreamingDecoder::new(&self.file).into_trace(Error::ServiceLogCompress)?;
     let mut contents = Vec::new();
+
     // Read the decompressed log contents
     decoder.read_to_end(&mut contents).into_trace(Error::ServiceLogCompress)?;
 
     // This is to timestamp the log at the time it was received
-    let timeNow = SystemTime::now().duration_since(UNIX_EPOCH)
-                                    .into_trace(Error::Time)?
-                                    .as_millis()
-                                    .to_string();
+    let timeNow = SystemTime::now().duration_since(UNIX_EPOCH).into_trace(Error::Time)?.as_millis().to_string();
 
     // Send timestamp to log
     contents.extend_from_slice(timeNow.as_bytes());
@@ -692,7 +763,7 @@ impl Logger
     // This byte is how ktctl can differentiate messages from init & service
     if (fromInit)
     {
-      contents.push(INIT_LOG_ENTRY);
+      contents.push(Self::INIT_ENTRY);
     }
 
     // Addon the log contents
@@ -701,16 +772,15 @@ impl Logger
     contents.push(b'\n');
 
     /*
-     * Make sure we are not stalled, because if we are we will
-     * interrupt the user shell with our message, and then
-     * check this message isn't from the init because if so
+     * Make sure we are not stalled, because if we are we will interrupt the user shell
+     * with our message, and then check this message isn't from the init because if so
      * it will have already been reported once
      */
     if (state!().is_ok() && !fromInit && self.shout)
     {
       for line in (new.split('\n'))
       {
-        log!(format!("{marker} {}({}):{} {line}", Colour::BOLD, self.name, Colour::RESET));
+        log!(format!("{marker} {}({}):{} {line}", Colour::Bold, self.name, Colour::Reset));
       }
     }
 
@@ -719,6 +789,7 @@ impl Logger
      * the beginning to overwrite the file instead of appending it
      */
     self.file.rewind().into_trace(Error::ServiceLogContent)?;
+
     // Overwrite log file with new contents
     compress(Cursor::new(contents), &mut self.file, CompressionLevel::Fastest);
     self.line += 1;
@@ -753,7 +824,7 @@ impl TryFrom<u8> for Pattern
     match (input)
     {
       STANDARD => Ok(Self::Standard), FORKING => Ok(Self::Forking), RUN_ONCE => Ok(Self::RunOnce),
-      _ => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Expected standard/forking/oneshot service byte, got: {input}")))
+      _ => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Expected valid pattern byte, got: {input}")))
     }
   }
 }

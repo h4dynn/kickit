@@ -1,7 +1,7 @@
 //! Error handling, warning & status implementations for the init process
 
 use std::{sync::Mutex, fmt::Display};
-use crate::{oncelock, console::{Colour, ReturnError, ErrorResult, ExtendWithContext, error}, state::InitState};
+use crate::{oncelock, console::{Colour, Colourize, ReturnError, ErrorResult, ExtendWithContext, error}, state::InitState};
 
 #[derive(derive_more::Display)]
 pub enum Marker
@@ -94,22 +94,24 @@ macro_rules! innerFatal
   {
     use $crate::init::console::Marker::Fatal;
 
-    log!(format!("{}{} {}{}", Fatal, Colour::BOLD, $error, Colour::RESET));
+    log!(format!("{Fatal} {}", $error.colour(Colour::Red)));
     $error.exit();
   };
   (@trace $error: tt) =>
   {
     use $crate::init::console::Marker::Fatal;
 
-    log!(format!("{}{} {}{}{}", Fatal, Colour::BOLD, $error.kind, Colour::RESET,
-                  if let Some(ref c) = $error.context { format!(": {c}") } else { String::new() }));
+    // Move out from struct
+    let ErrorTrace { kind, ref trace, context } = $error;
+
+    log!(format!("{Fatal} {}{}", kind.colour(Colour::Red), context.as_ref().map(|c| format!(": {c}")).unwrap_or_default()));
 
     if (!$error.trace.is_empty())
     {
-      log!(format!("{}{} >> {}", Fatal, Colour::RESET, $error.trace.trim_end_matches('\n')));
+      log!(format!("{Fatal} >> {}", trace.trim_end_matches('\n')));
     }
 
-    $error.kind.exit();
+    kind.exit();
   };
 }
 
@@ -153,7 +155,7 @@ impl Error
 {
   fn exit(self) -> !
   {
-    use std::process;
+    use std::process::exit;
     use Error::{AlreadyRunning, NotInit, NotRoot};
 
     if (!matches!(self, AlreadyRunning | NotInit | NotRoot))
@@ -161,34 +163,48 @@ impl Error
       kickToEmergencyShell();
     }
 
-    process::exit(1);
+    exit(1);
   }
 }
 
-fn kickToEmergencyShell()
+/*
+ * This will kick the user into an emergency shell when an error is encountered.
+ * The shell, however, will not be privileged, as this creates a security risk,
+ * since no password is asked for the root shell.
+ */
+fn kickToEmergencyShell() -> !
 {
-  use std::process::Command;
-  use crate::{init::SHELL, state::INIT_STATE};
+  use std::{process::Command, os::unix::process::CommandExt, thread::park};
+  use crate::{init::{EMERGENCY_SHELL, EMERGENCY_SHELL_UID}, state::INIT_STATE};
+
+  const NOBODY_GID: u32 = 65534;
 
   // Try to lock the mutex & see if we are in emergency already
   if let Ok(mut state) = INIT_STATE.lock() && (*state != InitState::Emergency)
   {
-    warn!("Critical error when starting init, opening emergency shell");
+    warn!("Critical error when starting init, starting unprivileged emergency shell now");
 
     *state = InitState::Emergency;
     // Allow other parts of the init system to access the state
     drop(state);
 
-    // Open shell in interactive mode
-    Command::new("/usr/bin/env")
-      .args(["-S", "PS1=\'\\[\\e[1m\\](emergency)\\[\\e[0m\\] \\w # \'", SHELL, "-himBHs"])
+    // Run the emergency shell wrapper script, which should ensure this works in all environments
+    Command::new("/usr/lib/kickit/emergency_shell")
+      // Run as an unprivileged user, this means if we want to do anything requiring root we need a password
+      .uid(EMERGENCY_SHELL_UID)
+      .gid(NOBODY_GID)
+      .arg(EMERGENCY_SHELL)
       .spawn()
       .expect("Failed to open an emergency shell!")
       .wait()
       .unwrap();
 
-    // Don't exit here otherwise we will get a kernel panic
     warn!("Hanging on error, shell was exited!");
+  }
+
+  // Don't exit here otherwise we will get a kernel panic
+  loop {
+    park();
   }
 }
 
@@ -218,8 +234,7 @@ pub use crate::log as log;
 #[macro_export]
 macro_rules! stall
 {
-  () =>
-  {
+  () => {
     use std::{thread::sleep, time::Duration};
     use $crate::{state::INIT_STATE, state::InitState::Stalled};
 
@@ -263,7 +278,7 @@ macro_rules! warn
   {
     {
       use $crate::init::console::{log, Marker::Warn};
-      log!(format!("{} {}{}{}", Warn, Colour::BOLD, format!($($message)*), Colour::RESET))
+      log!(format!("{} {}{}{}", Warn, Colour::Bold, format!($($message)*), Colour::Reset))
     }
   };
 }

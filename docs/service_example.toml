@@ -39,7 +39,7 @@ exec = ["/bin/bash", "-c", "echo 'Hello world' >&2"]
 #
 [sandbox]
 flags = [
-  "new_namespace", "new_cgroup", "new_uts", "new_ipc", "new_user", "new_pid", "new_net"
+  "NewMount", "NewCGroup", "NewUts", "NewIpc", "NewUser", "NewPid", "NewNetwork"
 ]
 import = [
   "/usr/bin/bash",

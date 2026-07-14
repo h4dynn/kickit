@@ -6,7 +6,7 @@
 extern crate chrono;
 
 use std::fmt;
-use kickit::{console::{HandleError, Colour, ExtendWithContext}, socket::{Core, Log, Power},
+use kickit::{console::{HandleError, Colour, Colourize, ExtendWithContext}, socket::{Core, Log, Power},
               ktctl::{console::{StdResult, Result, Error}, socket::Request},
               console::{guard, ErrorResult}, binary, state::InitState};
 
@@ -15,7 +15,9 @@ struct Init;
 
 trait RunOperation
 {
+  // Requires root access to run
   fn root(&self) -> bool;
+  // Requires the init system to run
   fn initOnly(&self) -> bool;
 
   #[inline]
@@ -48,7 +50,6 @@ enum Operation
   Help(Option<String>),
   Version,
   ServiceList(Option<Vec<String>>),
-  ServiceRestart(String),
   State,
   Log(String, bool, bool),
   InitLog,
@@ -75,38 +76,36 @@ impl fmt::Display for Usage
     {
       Self::Main =>
       {
-        format!("{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}\n{}\n",
-          "Usage: ", binary!(), " [OPERATION]",
+        format!("{}{}{}\n{}\n{}{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}\n{}\n",
+          "Usage: ", binary!().bold(), " [ACTION]",
           "Manage the kickit init system",
           '\n',
-          "Operations:",
-          " help                     Show this help prompt",
-          " version                  Show kickit version",
-          " service [S]              List all services or selected services",
-          " log (--init) <S>         Read a service's logs",
-          " state                    Show current init state",
-          " target                   Show current loaded target",
-          " shutdown [--force]       Shutdown this device (force not recommended!)",
-          " reboot [--force]         Reboot this device (force not recommended!)",
+          "Actions:".bold(),
+          " help                       Show this help prompt or prompt for an action",
+          " version                    Version of this ktctl",
+          " service [SERVICEs]         List all services or selected services",
+          " log (--init) SERVICE       Read a service's logs",
+          " state                      Current state of the init system",
+          " target                     Show current loaded target",
+          " shutdown [--force]         Shutdown this device safely",
+          " reboot [--force]           Reboot this device safely",
           '\n',
-          "Try 'ktctl help [OPERATION]' for more info",
-          b = Colour::BOLD, r = Colour::RESET
+          "Try 'ktctl help [ACTION]' for more info"
         )
       },
       Self::Log =>
       {
-        format!("{}{}{b}{}{r}{}\n{}\n{}{b}{}{r}\n{}\n{}\n{}\n",
-          "Usage: ", binary!(), " log", " [ARGUMENTs..] [SERVICE]",
+        format!("{}{}{}{}\n{}\n{}{}\n{}\n{}\n{}\n",
+          "Usage: ", binary!().bold(), " log", " [ARGUMENTs..] [SERVICE]",
           "View a service's or init's logs (requires root access)",
           '\n',
-          "Arguments:",
+          "Arguments:".bold(),
           " --plain              Plain output (no colours + timestamp as millis)",
           " --init               View the init's master log",
-          " --service-only       Ignore any messages from init",
-          b = Colour::BOLD, r = Colour::RESET
+          " --service-only       Ignore any messages from init"
         )
       },
-      Self::Service => format!("Usage: {}{} service{} [NAMEs..]", binary!(), Colour::BOLD, Colour::RESET),
+      Self::Service => format!("Usage: {} service [NAMEs..]", binary!().bold()),
       // ^.^
       Self::Taskitty => include_str!("../../assets/taskitty.txt").to_string()
     })
@@ -117,9 +116,9 @@ impl TryFrom<&str> for Usage
 {
   type Error = ();
 
-  fn try_from(strFlag: &str) -> StdResult<Self, ()>
+  fn try_from(flag: &str) -> StdResult<Self, ()>
   {
-    match (strFlag)
+    match (flag)
     {
       "" => Ok(Usage::Main),
       "log" => Ok(Usage::Log),
@@ -132,17 +131,26 @@ impl TryFrom<&str> for Usage
 
 impl Init
 {
+  pub async fn pid() -> Result<u32>
+  {
+    // Response should be 4 bytes (u32, in little endian byte order, so reverse)
+    let bytes: [u8; 4] = Core.request(Core::PID).await??
+                            .try_into()
+                            .map_err(|_| Error::Format.trace("invalid init pid!"))?;
+
+    Ok(u32::from_le_bytes(bytes))
+  }
+
   pub async fn state() -> InitState
   {
-    use InitState::{Down, Emergency, Stalled};
+    use InitState::{Okay, Down, Emergency, Stalled};
 
     if let Ok(Ok(state)) = Core.request(Core::STATE).await
     {
       // Convert the state from a u8 byte to an InitState
       match (state[0].into())
       {
-        InitState::Ok =>
-        {
+        Okay => {
           /*
            * Make sure the version of `ktctl` and `kickit` match to avoid
            * potential compatibility issues
@@ -150,7 +158,7 @@ impl Init
           if let Ok(Ok(version)) = Core.request(Core::VERSION).await &&
               (version.as_slice() == format!("{}\n", env!("CARGO_PKG_VERSION")).as_bytes())
           {
-            return InitState::Ok
+            return Okay
           }
         },
         // No further checks need to be done here
@@ -166,30 +174,29 @@ impl Init
   #[inline]
   pub async fn prettyState() -> Result<()>
   {
-    use InitState::{Emergency, Down, Stalled};
+    use InitState::{Okay, Down, Emergency, Stalled};
 
     let state = Self::state().await;
-    // Matching colour for our init state (e.g. up / running = green)
+    // Matching colour for our init state (e.g. up / running = Green)
     let colour = match (state)
     {
-      Emergency | Down => Colour::RED,
-      Stalled => Colour::ORANGE,
-      InitState::Ok => Colour::GREEN
+      Emergency | Down => Colour::Red,
+      Stalled => Colour::Orange,
+      Okay => Colour::Green
     };
 
     /*
      * Request the init PID from the socket, this is how we test if kickit
      * is running as the init process or not
      */
-    let initPid = u32::from_le_bytes(Core.request(Core::PID).await??.try_into()
-                                      .map_err(|_| Error::Format.trace("Invalid init pid!"))?);
+    let pid = Init::pid().await?;
 
-    if (initPid == 1)
+    if (pid == 1)
     {
-      println!("{colour}{state}{}", Colour::RESET);
+      println!("{}", state.colour(colour));
     }
     else {
-      println!("{colour}{state}{} (pid: {initPid})", Colour::RESET);
+      println!("{} (pid: {})", state.colour(colour), pid);
     }
 
     Ok(())
@@ -203,7 +210,7 @@ impl Init
 
   pub async fn readLog() -> Result<()>
   {
-    eprintln!("{}", String::from_utf8(Log.request(Log::MASTER).await??).into_trace(Error::Format)?);
+    eprintln!("{}", &str::from_utf8(Log.request(Log::MASTER).await??.as_slice()).into_trace(Error::Format)?);
     Ok(())
   }
 }
@@ -228,7 +235,7 @@ impl Operation
           // Generate a generic usage prompt here since there is no extra info available
           "help" | "version" | "state" | "target" =>
           {
-            println!("Usage: {} {}{}{}", binary!(), Colour::BOLD, name, Colour::RESET);
+            println!("Usage: {} {name}", binary!().bold());
             Ok(())
           },
           // Unrecognised operation provided
@@ -246,15 +253,14 @@ impl Operation
   #[inline]
   fn version()
   {
-    use kickit::{ktctl::LOGO, version};
-
-    println!("{b}{}{r}\n{b}ktctl:{r} {}", LOGO, version(), b = Colour::BOLD, r = Colour::RESET);
+    use kickit::ktctl::LOGO;
+    println!("{}\n{} {}", LOGO.bold(), "ktctl:".bold(), kickit::VERSION);
   }
 
   async fn targetInfo() -> Result<()>
   {
     // Read target name from the socket, and format as a String
-    eprint!("{}", String::from_utf8(Core.request(Core::TARGET).await??).into_trace(Error::Format).context("target")?);
+    print!("{}", String::from_utf8(Core.request(Core::TARGET).await??).into_trace(Error::Format).context("target")?);
     Ok(())
   }
 
@@ -271,8 +277,7 @@ impl Operation
       false => Power::SHUTDOWN
     };
 
-    let initPid = u32::from_le_bytes(Core.request(Core::PID).await??
-                                      .try_into().map_err(|_| Error::SocketResponse.trace("Invalid sized LE integer from init!"))?);
+    let pid = Init::pid().await?;
 
     // Send power signal
     if let Ok(Err(error)) = Power.request(ask).await
@@ -280,10 +285,12 @@ impl Operation
       return Err(error.into());
     }
 
-    if (initPid == 1)
+    if (pid == 1)
     {
       // Block until shutdown
-      park();
+      loop {
+        park();
+      }
     }
     // Should only reach this point if kickit wasn't the init process
     Ok(())
@@ -294,19 +301,20 @@ impl RunOperation for Operation
 {
   fn root(&self) -> bool
   {
-    matches!(self, Self::InitLog | Self::Log(..) | Self::Shutdown(..) | Self::Reboot(..))
+    use Operation::{InitLog, Log, Shutdown, Reboot};
+    matches!(self, InitLog | Log(..) | Shutdown(..) | Reboot(..))
   }
 
   fn initOnly(&self) -> bool
   {
-    matches!(self, Self::ServiceList(..) | Self::TargetInfo | Self::InitLog |
-                    Self::Log(..) | Self::Shutdown(..) | Self::Reboot(..))
+    use Operation::{ServiceList, TargetInfo, InitLog, Log, Shutdown, Reboot};
+    matches!(self, ServiceList(..) | TargetInfo | InitLog | Log(..) | Shutdown(..) | Reboot(..))
   }
 
   async fn run(self) -> Result<()>
   {
     use kickit::ktctl::service::{PartialService, serviceList};
-    use Operation::{Help, Version, ServiceList, ServiceRestart, State, TargetInfo,
+    use Operation::{Help, Version, ServiceList, State, TargetInfo,
                   InitLog, Log, Shutdown, Reboot};
 
     // Check if root access / init is required for this operation
@@ -321,11 +329,10 @@ impl RunOperation for Operation
         Ok(())
       },
       ServiceList(services) => serviceList(services.as_deref()),
-      ServiceRestart(..) => todo!(), /*serviceRestart(services),*/
       Log(name, ugly, ignoreInit) =>
       {
         let service = PartialService::import(&name)?;
-        service.readLog(ugly, ignoreInit)
+        service.logs(ugly, ignoreInit)
       },
       InitLog => Init::readLog().await,
       State => Init::prettyState().await,
@@ -340,8 +347,7 @@ impl RunOperation for Operation
 fn parseArgs(mut arguments: Vec<String>) -> Result<Operation>
 {
   use kickit::breakif;
-  use Operation::{Help, Version, TargetInfo, State, ServiceList,
-                    ServiceRestart, InitLog, Log, Shutdown, Reboot};
+  use Operation::{Help, Version, TargetInfo, State, ServiceList, InitLog, Log, Shutdown, Reboot};
 
   match (&arguments[0] as &str)
   {
@@ -381,16 +387,6 @@ fn parseArgs(mut arguments: Vec<String>) -> Result<Operation>
       }
       else {
         ServiceList(Some(arguments[2..].into()))
-      }
-    },
-    "service-restart" =>
-    {
-      if (arguments.len() == 3)
-      {
-        ServiceRestart(arguments.remove(2))
-      }
-      else {
-        Err(Error::MissingArgument.trace("service-restart"))?
       }
     },
     "log" =>

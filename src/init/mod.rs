@@ -20,13 +20,10 @@ oncelock! {
   pub static PID: Option<u32>;
 }
 
-// Some distros such as Alpine will use more lightweight shells, such as ash
-#[cfg(feature = "posix_sh")]
-pub(crate) const SHELL: &str = "/bin/sh";
-
-// The default shell will be bash unless the "posix_sh" feature is set
-#[cfg(not(feature = "posix_sh"))]
-pub(crate) const SHELL: &str = "/bin/bash";
+// The ID of the "kickit-shell" user account, which an emergency shell is opened on
+pub const EMERGENCY_SHELL_UID: u32 = 490;
+// Path of the emergency shell to execute, some distros may not have bash installed by default
+pub const EMERGENCY_SHELL: &str = "/bin/bash";
 
 /**
   * # Errors
@@ -36,7 +33,7 @@ pub(crate) const SHELL: &str = "/bin/bash";
   */
 // Get a command-line parameter using the /proc/cmdline file
 #[inline]
-pub fn cmdlineParam(param: &str) -> Result<Option<String>>
+pub fn cmdline(param: impl AsRef<str>) -> Result<Option<String>>
 {
   use std::{fs, path::PathBuf};
   use crate::console::ErrorResult;
@@ -49,17 +46,17 @@ pub fn cmdlineParam(param: &str) -> Result<Option<String>>
   for cmdlineParam in (cmdline.split(' '))
   {
     // Parameter has a value to give
-    if let Some((key, value)) = cmdlineParam.trim_end_matches('\n').split_once('=') && (key == param)
+    if let Some((key, value)) = cmdlineParam.trim_end_matches('\n').split_once('=') && (key == param.as_ref())
     {
       return Ok(Some(value.to_owned()))
     }
     // No value, just bool parameter
-    else if (cmdlineParam == param)
+    else if (cmdlineParam == param.as_ref())
     {
       return Ok(None)
     }
   }
 
   // Command-line parameter was not found at all
-  Err(Error::Cmdline.trace(param))
+  Err(Error::Cmdline.trace(param.as_ref()))
 }

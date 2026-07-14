@@ -1,6 +1,6 @@
 /*!
  * ABI for kickit sockets
- * For socket behavior implementations, see `init::socket`, for generic requests see `ktctl::socket`
+ * For socket behavior implementations, see `init::socket`, for requests see `ktctl::socket`
  */
 
 use std::{io, path::PathBuf};
@@ -8,7 +8,8 @@ use tokio::net::UnixStream;
 use thiserror::Error;
 
 // Error bytes sent to the peer on the other end of the socket
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Error, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Error, Default)]
+#[repr(u8)]
 pub enum PeerError
 {
   #[default]
@@ -68,7 +69,7 @@ pub trait Socket: Send + 'static
     // These are the default paths, used except for when a custom method is defined
     tern! {
       Self::PRIVATE => file_path!(PathBuf::from("/run/kickit/private"), "io", Self::NAME),
-      else => file_path!(PathBuf::from("/run/kickit"), "io", Self::NAME)
+      _ => file_path!(PathBuf::from("/run/kickit"), "io", Self::NAME)
     }
   }
 
@@ -83,7 +84,7 @@ pub trait Socket: Send + 'static
    *
    * 'async' isn't specified here, instead a workaround (-> impl Future)
    * because the compiler suggests to use it so others can use
-   * auto-traits like Send if needed (lint: `async_fn_in_trait`)
+   * auto-traits like Send if needed (lint: `clippy::async_fn_in_trait`)
    */
   fn handler(&'static self, stream: &mut UnixStream) -> impl Future<Output = ()> + Send;
 }
@@ -117,9 +118,9 @@ impl Power
 
 impl PeerError
 {
-  pub const IS_OK: u8 = 0xaf;
+  pub const OK: u8 = 0xaf;
   // Marker that this reply from socket is infact an error
-  pub const IS_ERROR: u8 = 0xee;
+  pub const ERR: u8 = 0xee;
 
   // Resolve error variant from its matching byte
   /**
@@ -144,6 +145,7 @@ impl PeerError
 
     // If we match this byte to an error, return the matching error
     errorize!(input => Unknown | Internal | NotReadReady | NotWriteReady | IoRead | IoWrite | Unsupported | BadInput);
+
     // No error byte was found..
     Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Couldn't match {input} to any valid error variant")))
   }

@@ -1,7 +1,7 @@
 //! Error handling, warning & status implementations for ktctl
 
 use std::fmt::Display;
-use crate::{error, binary, console::{Colour, ReturnError, ErrorResult, ExtendWithContext}};
+use crate::{error, binary, console::{Colour, Colourize, ReturnError, ErrorResult, ExtendWithContext}};
 
 error! {
   #[derive(PartialEq, Eq, Clone, Debug, Default, thiserror::Error)]
@@ -36,7 +36,7 @@ macro_rules! innerFatal
     {
       use std::process;
 
-      eprintln!("{} {}(ERROR):{} {}{}", binary!(), Colour::RED, Colour::BOLD, $message, Colour::RESET);
+      eprintln!("{}: {} {}", binary!(), "error:".colour(Colour::Red), $message.colour(Colour::Bold));
       process::exit(1);
     }
   };
@@ -58,17 +58,9 @@ macro_rules! innerFatal
       };
 
       // Same as above but for a trace
-      let trace = {
-        if (!$trace.is_empty())
-        {
-          format!(": {}", $trace)
-        }
-        else {
-          String::new()
-        }
-      };
+      let trace = (!$trace.is_empty()).then_some(format!(": {}", $trace)).unwrap_or_default();
 
-      eprintln!("{} {}(ERROR):{} {}{}{trace}{addon}", binary!(), Colour::RED, Colour::BOLD, $message, Colour::RESET);
+      eprintln!("{}: {} {}{}{}", binary!(), "error:".colour(Colour::Red), $message.colour(Colour::Bold), trace, addon);
       process::exit(1);
     }
   };
@@ -105,8 +97,7 @@ macro_rules! ktctl_warn
   ($($message: tt)*) =>
   {
     {
-      eprintln!("{} {}(WARNING):{} {}{}", binary!(), Colour::ORANGE, Colour::BOLD,
-                          format!($($message)*), Colour::RESET);
+      eprintln!("{}: {} {}", binary!(), "warning:".colour(Colour::Orange), format!($($message)*).colour(Colour::Bold));
     }
   };
 }

@@ -56,25 +56,18 @@ pub fn forcePoweroff(mode: Mode) -> Result<Infallible>
 pub fn poweroff(mode: Mode) -> Result<Infallible>
 {
   use crate::{continueif, console::{Colour, HandleError, ReturnError}};
-  use super::{mount::{unmount, unmountFlags, UnmountFlag::Lazy}, service::SERVICES, console::{status, warn}};
-  use nix::{unistd::Pid, sys::{reboot::reboot, signal::{kill, Signal}}};
+  use super::{mount::{unmount, unmountFlags, UnmountFlag::Lazy}, service::STANDARD_SERVICES, console::{status, warn}};
+  use nix::sys::reboot::reboot;
   use std::{fs, path::PathBuf, process};
 
   let noInit = oncelock!(&PID)?.is_some();
   // This makes sure that when we kill the services, the service manager doesn't throw an error
   oncelock! { POWER_OFF_READY = true }?;
 
-  for (name, pid) in (oncelock!(&SERVICES)?)
+  for service in (oncelock!(&STANDARD_SERVICES)?)
   {
-    status!("Killing service: {name}");
-
-    // First try killing with SIGQUIT
-    if let Err(err) = kill(Pid::from_raw(pid.cast_signed()), Some(Signal::SIGQUIT)).into_trace(Error::Unknown)
-    {
-      warn!("Failed to kill service, so we will force kill it: {}", err.trace);
-      // If that doesn't work we use SIGKILL
-      kill(Pid::from_raw(pid.cast_signed()), Some(Signal::SIGKILL)).into_trace(Error::Unknown).or_warn();
-    }
+    status!("Killing service: {}", service.name);
+    service.down()?;
   }
 
   for mountInfoString in (fs::read_to_string("/proc/mounts").into_trace(Error::ProcFs)?.lines())

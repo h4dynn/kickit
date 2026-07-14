@@ -1,6 +1,6 @@
 [package]
 name = "kickit"
-version = "0.1.2"
+version = "26.7.1"
 description = "A robust & simple init system"
 repository = "https://github.com/h4dynn/kickit"
 readme = "README.md"
@@ -39,8 +39,6 @@ strip = "none"
 # Bypass function that checks if pid 1 is kickit
 # (use this only for debugging since it may cause unexplained errors)
 bypass_init_check = []
-# Use POSIX shell (/bin/sh) instead of bash
-posix_sh = []
 # Use the dhat heap profiler - for debugging memory usage
 dhat_heap = ["dhat"]
 # Stable release

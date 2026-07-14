@@ -1,6 +1,6 @@
 //! General implementation for logging, errors and status updates
 
-use std::fmt::Display;
+use std::{fmt, fmt::Display, ops::Deref};
 
 /*
  * Implementation for throwing an error with a trace (ErrorTrace) or
@@ -30,7 +30,7 @@ pub trait HandleError: Sized
  * Addon more context to an error for diagnostics, this is usually the name of something,
  * i.e., if an error occurs with a specific service we add the service's name as context
  */
-pub trait ExtendWithContext<OkType, ErrorType>
+pub trait ExtendWithContext<OkType, ErrType>
 {
   /**
     * Add context to an existing trace error
@@ -38,7 +38,7 @@ pub trait ExtendWithContext<OkType, ErrorType>
     * # Errors
     * - Result is of error variant
     */
-  fn context(self, context: impl Display) -> Result<OkType, ErrorType>;
+  fn context(self, context: impl Display) -> Result<OkType, ErrType>;
 }
 
 /*
@@ -54,22 +54,205 @@ pub trait ErrorResult<ErrKind: ReturnError, ErrOutput: ReturnError, OkType, ErrT
     * # Errors
     * - Data type contains an error (e.g. Result is Err(..))
     */
-  fn into_trace(self, errorKind: ErrKind) -> Result<OkType, ErrOutput>;
+  fn into_trace(self, kind: ErrKind) -> Result<OkType, ErrOutput>;
 }
 
-#[derive(derive_more::Display)]
+pub trait Colourize: Display + Sized
+{
+  /*
+   * Create a new coloured instance from an existing displayable type, this is one of
+   * two ways you can go:
+   *
+   * `FmtString::from("hello world!").bold()` -> Creates a non-coloured instance, then
+   *   colours it (inefficient)
+   *
+   * or
+   * 
+   * `"hello world!".bold()` -> Creates a new coloured instance (better)
+   */
+  fn colour(self, colour: Colour) -> FmtString
+  {
+    FmtString { colours: vec![colour], inner: self.to_string(), dont_reset: false }
+  }
+
+  fn bold(self) -> FmtString
+  {
+    self.colour(Colour::Bold)
+  }
+}
+
+#[derive(Copy, Clone, Debug, derive_more::Display)]
 pub enum Colour
 {
   #[display("\x1b[0m")]
-  RESET,
-  #[display("\x1b[0;1m")]
-  BOLD,
-  #[display("\x1b[0;1;31m")]
-  RED,
-  #[display("\x1b[0;1;33m")]
-  ORANGE,
-  #[display("\x1b[0;1;92m")]
-  GREEN
+  Reset,
+  #[display("\x1b[1m")]
+  Bold,
+  #[display("\x1b[1;31m")]
+  Red,
+  #[display("\x1b[1;33m")]
+  Orange,
+  #[display("\x1b[1;92m")]
+  Green
+}
+
+#[derive(Debug, Default)]
+pub struct FmtStr<'inner>
+{
+  colours: &'inner [Colour],
+  inner: &'inner str,
+  dont_reset: bool
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FmtString
+{
+  colours: Vec<Colour>,
+  inner: String,
+  dont_reset: bool
+}
+
+impl Display for FmtStr<'_>
+{
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+  {
+    write!(f, "{}", self.resolve())
+  }
+}
+
+impl Display for FmtString
+{
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+  {
+    write!(f, "{}", self.as_ref().resolve())
+  }
+}
+
+impl FmtString
+{
+  #[must_use]
+  pub const fn new() -> Self
+  {
+    Self { colours: Vec::new(), inner: String::new(), dont_reset: false }
+  }
+
+  // This will create a new instance which can be inefficient, try `.push_colour()` on an existing instance
+  #[must_use]
+  pub fn colour(mut self, colour: Colour) -> Self
+  {
+    self.push_colour(colour);
+    self
+  }
+
+  #[must_use]
+  pub fn bold(self) -> Self
+  {
+    self.colour(Colour::Bold)
+  }
+
+  // Reference to an existing instance
+  #[must_use]
+  pub const fn as_ref(&self) -> FmtStr<'_>
+  {
+    FmtStr { colours: self.colours.as_slice(), inner: self.inner.as_str(), dont_reset: self.dont_reset }
+  }
+
+  // Change whether the end of the formatted String will have a reset (\e[0m)
+  #[must_use]
+  pub fn reset(self, reset: bool) -> Self
+  {
+    FmtString { colours: self.colours, inner: self.inner, dont_reset: !reset }
+  }
+
+  pub fn push_str(&mut self, string: &str)
+  {
+    self.inner.push_str(string);
+  }
+
+  pub fn push_colour(&mut self, colour: Colour)
+  {
+    self.colours.push(colour);
+  }
+
+  // INFO: this does not clear the colours!
+  pub fn clear(&mut self)
+  {
+    self.inner.clear();
+  }
+}
+
+impl FmtStr<'static>
+{
+  #[must_use]
+  pub const fn new() -> Self
+  {
+    Self { colours: &[], inner: "", dont_reset: false }
+  }
+}
+
+impl FmtStr<'_>
+{
+  // Copy into a new owned formatted string instance
+  #[must_use]
+  pub fn to_owned(self) -> FmtString
+  {
+    FmtString { colours: self.colours.to_vec(), inner: self.inner.to_owned(), dont_reset: self.dont_reset }
+  }
+
+  pub fn resolve(&self) -> String
+  {
+    // Transform all colours into their string data
+    let mut out: Vec<String> = self.colours.iter().map(ToString::to_string).collect();
+    // The main actual content
+    out.push(self.inner.to_string());
+
+    // This is going to be false 99% of the time except for some niche cases (change with `.reset(..)`)
+    if (!self.dont_reset)
+    {
+      out.push(Colour::Reset.to_string());
+    }
+
+    // Concatenate all output together into a singular string
+    out.join("")
+  }
+}
+
+// Create a no-colour formatted string
+impl<'inner> From<&'inner str> for FmtStr<'inner>
+{
+  fn from(inner: &'inner str) -> Self
+  {
+    Self { colours: &[], inner, dont_reset: false }
+  }
+}
+
+impl From<String> for FmtString
+{
+  fn from(inner: String) -> Self
+  {
+    Self { colours: Vec::new(), inner, dont_reset: false }
+  }
+}
+
+// Get just the inner string, no colours
+impl Deref for FmtStr<'_>
+{
+  type Target = str;
+
+  fn deref(&self) -> &str
+  {
+    self.inner
+  }
+}
+
+impl Deref for FmtString
+{
+  type Target = String;
+
+  fn deref(&self) -> &String
+  {
+    &self.inner
+  }
 }
 
 /*
@@ -94,11 +277,7 @@ impl<S, F: ReturnError> HandleError for Result<S, F>
     match (self)
     {
       Ok(ok) => Some(ok),
-      Err(error) =>
-      {
-        error.warn();
-        None
-      }
+      Err(error) => { error.warn(); None }
     }
   }
 }
@@ -126,6 +305,8 @@ impl<F: ReturnError> HandleError for Option<F>
   }
 }
 
+impl<Displayable: Display + Sized> Colourize for Displayable {}
+
 // An error type, this is just a lot of boilerplate so we can simplify this with a macro
 #[macro_export]
 macro_rules! error
@@ -139,8 +320,7 @@ macro_rules! error
         $variant: ident $(<$($variantGeneric: ident $(: $($variantDepend: ty),*)?),*>)?
       ),*
     }
-  } =>
-  {
+  } => {
     pub use std::result::Result as StdResult;
     // Just a Result where the error type is of ErrorTrace
     pub type Result<S> = StdResult<S, ErrorTrace>;
@@ -166,17 +346,17 @@ macro_rules! error
 
     impl<OkType, ErrType: Display> ErrorResult<Error, ErrorTrace, OkType, ErrType> for StdResult<OkType, ErrType>
     {
-      fn into_trace(self, errorKind: Error) -> Result<OkType>
+      fn into_trace(self, kind: Error) -> Result<OkType>
       {
-        self.map_err(|trace| errorKind.trace(&trace))
+        self.map_err(|trace| kind.trace(&trace))
       }
     }
 
     impl<ErrType: Display> ErrorResult<Error, ErrorTrace, (), ErrType> for Option<ErrType>
     {
-      fn into_trace(self, errorKind: Error) -> Result<()>
+      fn into_trace(self, kind: Error) -> Result<()>
       {
-        if let Some(err) = self.map(|trace| errorKind.trace(&trace))
+        if let Some(err) = self.map(|trace| kind.trace(&trace))
         {
           Err(err)
         }
@@ -188,17 +368,17 @@ macro_rules! error
 
     impl ErrorResult<Error, ErrorTrace, (), String> for String
     {
-      fn into_trace(self, errorKind: Error) -> Result<()>
+      fn into_trace(self, kind: Error) -> Result<()>
       {
-        Err(errorKind.trace(&self))
+        Err(kind.trace(&self))
       }
     }
 
     impl ErrorResult<Error, ErrorTrace, (), std::io::Error> for std::io::Error
     {
-      fn into_trace(self, errorKind: Error) -> Result<()>
+      fn into_trace(self, kind: Error) -> Result<()>
       {
-        Err(errorKind.trace(&self))
+        Err(kind.trace(&self))
       }
     }
 

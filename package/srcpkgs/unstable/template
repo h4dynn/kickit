@@ -31,6 +31,7 @@ do_install()
 
   install -vm0755 ./target/x86_64-unknown-linux-musl/release/kickit "$DESTDIR/usr/lib/kickit/kickit"
   install -vm0755 ./target/x86_64-unknown-linux-musl/release/ktctl "$DESTDIR/usr/bin/ktctl"
+  install -vm0755 ./src/emergency_shell.sh "$DESTDIR/usr/lib/kickit/emergency_shell"
   install -vm0755 ./src/service-helpers/agetty.sh "$DESTDIR/usr/lib/kickit/agetty.sh"
   install -vm0755 ./src/service-helpers/udev.sh "$DESTDIR/usr/lib/kickit/udev.sh"
 

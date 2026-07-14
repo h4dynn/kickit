@@ -59,8 +59,8 @@ impl<S: AsRef<[u8]>> SocketResult<Vec<u8>> for S
 
     match (inner[0])
     {
-      PeerError::IS_OK => Ok(Ok(inner[1..].to_vec())),
-      PeerError::IS_ERROR => Ok(Err(PeerError::errorize(inner[1]).into_trace(Error::SocketResponse)?)),
+      PeerError::OK => Ok(Ok(inner[1..].to_vec())),
+      PeerError::ERR => Ok(Err(PeerError::errorize(inner[1]).into_trace(Error::SocketResponse)?)),
       bad => Err(Error::SocketResponse.trace(format!("Expected ok/err, got {bad}")))
     }
   }

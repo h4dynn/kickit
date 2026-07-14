@@ -1,30 +1,42 @@
 //! Mount implementation layered over the `nix`
 
-use crate::{wrap, OptionEmptyVec, console::ErrorResult};
-use super::console::{Result, Error, ErrorTrace};
-
+use crate::{wrap, BoxedStr, OptionEmptyVec, console::ErrorResult, init::console::{Result, Error, ErrorTrace}};
+use nix::mount::MsFlags;
 use std::{fmt, fmt::Display, path::Path};
+
+// A cast we can guarantee is safe, e.g. when we know the value beforehand
+macro_rules! safe_cast
+{
+  ($input: block as $cast: ty) =>
+  {{
+    #[allow(clippy::cast_possible_truncation)]
+    {
+      ($input) as $cast
+    }
+  }};
+}
 
 // Mount flags & their corresponding bit value (MsFlags)
 #[derive(PartialEq, Eq, Clone, Copy, Debug, derive_more::Display)]
 pub enum Flag
 {
   #[display("ro")]
-  ReadOnly = 1,
+  ReadOnly = safe_cast!({ MsFlags::MS_RDONLY.bits() } as isize),
   #[display("nosuid")]
-  NoSuid = 2,
+  NoSuid = safe_cast!({ MsFlags::MS_NOSUID.bits() } as isize),
   #[display("nodev")]
-  NoDev = 4,
+  NoDev = safe_cast!({ MsFlags::MS_NODEV.bits() } as isize),
   #[display("noexec")]
-  NoExec = 8,
+  NoExec = safe_cast!({ MsFlags::MS_NOEXEC.bits() } as isize),
   #[display("remount")]
-  Remount = 32,
+  Remount = safe_cast!({ MsFlags::MS_REMOUNT.bits() } as isize),
   #[display("bind")]
-  Bind = 4096,
+  Bind = safe_cast!({ MsFlags::MS_BIND.bits() } as isize),
   #[display("private")]
-  Private = 1 << 18
+  Private = safe_cast!({ MsFlags::MS_PRIVATE.bits() } as isize)
 }
 
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum UnmountFlag
 {
   // Unmount even if busy, pretty damn dangerous (nfs only)
@@ -37,24 +49,33 @@ pub enum UnmountFlag
   NoFollow = 8
 }
 
-pub type Opt = String;
-
 // Mount flags (casted as u64), added together
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
 pub struct Flags(u64);
 
 // Custom filesystem-specific options
 #[derive(PartialEq, Eq, Clone, Debug, Default)]
-pub struct Opts(Vec<Opt>);
+pub struct Opts(Vec<BoxedStr>);
 
 // For optional use with `unmount`, which in turn calls `nix::mount::umount2`
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
 pub struct UnmountFlags(i32);
 
+// TO-DO: idiomatic OOP way to parse mount entries
+/*#[derive(Clone, Debug)]
+pub struct MountEntry
+{
+  src: PathBuf,
+  dest: PathBuf,
+  fs: BoxedStr,
+  flags: Flags,
+  opts: Opts
+}*/
+
 wrap! {
   // Dereference to the first & only item in the tuple
   impl Deref<Target = u64> for Flags;
-  impl Deref<Target = Vec<Opt>> for Opts;
+  impl Deref<Target = Vec<BoxedStr>> for Opts;
   impl Deref<Target = i32> for UnmountFlags;
 }
 
@@ -354,7 +375,7 @@ pub fn mountFstabEntries() -> Result<()>
         // Ignore the "defaults" flag - it isn't recognised by the libc mount call
         else if (option != "defaults")
         {
-          (*opts).push(option.to_owned());
+          (*opts).push(option.into());
         }
       }
 
