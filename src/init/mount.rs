@@ -9,6 +9,7 @@ macro_rules! safe_cast
 {
   ($input: block as $cast: ty) =>
   {{
+    #[allow(clippy::cast_possible_wrap)]
     #[allow(clippy::cast_possible_truncation)]
     {
       ($input) as $cast

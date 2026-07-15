@@ -347,7 +347,7 @@ impl Sandbox<'_>
 
     if (*oncelock!(&MOUNT_SYSTEM_FS.unwrap_or(false)))
     {
-      unmount.extend(["/run", "/tmp", "/sys", "/proc", "/dev"].map(|s| s.into()));
+      unmount.extend(["/run", "/tmp", "/sys", "/proc", "/dev"].map(Into::into));
     }
 
     unmount.extend(self.bind.files.iter().map(|s| (&**s).into()));

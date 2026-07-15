@@ -57,16 +57,16 @@ impl StartService for Service
     * - Each service is started by this method,
     *
     * - Once started by `Service::up(..)`, the service is broken up into its logger &
-    *    supervisor,
+    *   supervisor,
     *
     * - The logger watches the service's stderr & stdout streams and reports them
-    *    (if `logger` is set to true),
+    *   (if `logger` is set to true),
     *
     * - The supervisor makes sure the service doesn't die, and if it does and is
-    *    not optional, throw a global error,
+    *   not optional, throw a global error,
     *
     * - What is left of the service is moved into `SERVICES`, where it will be used
-    *    when shutting down to stop the service
+    *   when shutting down to stop the service
     */
   #[inline]
   async fn start(mut self) -> Result<Option<Service>>

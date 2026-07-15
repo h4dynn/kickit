@@ -138,7 +138,7 @@ impl Service
 {
   fn run_path(&self, of: impl fmt::Display) -> PathBuf
   {
-    PathBuf::from(format!("/run/kickit/service/{}/{of}", &self.name))
+    PathBuf::from(format!("/run/kickit/service/{}/{of}", self.name))
   }
 
   /**
@@ -378,12 +378,12 @@ impl Service
             if (!status.success())
             {
               dbg!(BufReader::new(reader).lines().map(|x| x.unwrap()).collect::<Vec<String>>());
-              return Err(Error::ServiceUp.trace(format!("{} exited on error ({})", &self.name, status)))
+              return Err(Error::ServiceUp.trace(format!("{} exited on error ({})", self.name, status)))
             }
           },
           Ok(Err(error)) => error.into_trace(Error::ServiceUp)?,
           // Timeout was reached...
-          Err(..) => return Err(Error::ServiceUp.trace(format!("Timeout while waiting for {}", &self.name)))
+          Err(..) => return Err(Error::ServiceUp.trace(format!("Timeout while waiting for {}", self.name)))
         }
 
         // A buffered read is the most efficient way to read line-by-line
@@ -455,7 +455,7 @@ impl Service
   // WARNING: This method will take ownership of the logger from the service, replacing it to be unset
   pub fn logger(&mut self) -> Result<Logger>
   {
-    self.log.take().ok_or(Error::Unknown.trace(format!("{}: Logger missing!", &self.name)))
+    self.log.take().ok_or(Error::Unknown.trace(format!("{}: Logger missing!", self.name)))
   }
 
   /**
