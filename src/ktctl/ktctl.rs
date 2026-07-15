@@ -210,7 +210,7 @@ impl Init
 
   pub async fn readLog() -> Result<()>
   {
-    eprintln!("{}", &str::from_utf8(Log.request(Log::MASTER).await??.as_slice()).into_trace(Error::Format)?);
+    eprintln!("{}", str::from_utf8(Log.request(Log::MASTER).await??.as_slice()).into_trace(Error::Format)?);
     Ok(())
   }
 }
