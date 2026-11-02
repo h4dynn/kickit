@@ -49,7 +49,9 @@ jobs:
           tag: ${{ github.ref_name }}
         run: |
           mv -v package/hostdir/binpkgs/main/*.xbps .
-          gh release create "unstable-$(date +%s)" *.xbps -F CHANGELOG.md -R "h4dynn/kickit" -t "$(date +"%d %b %Y, %H:%M")" -p
+          changelog_cutoff=$(grep -nw '^## .*$' < CHANGELOG.md | head -n3 | tail -n1 | cut -d: -f1)
+          head -n$((changelog_cutoff-1)) < CHANGELOG.md > cut_changelog.md
+          gh release create "unstable-$(date +%s)" *.xbps -F cut_changelog.md -R "h4dynn/kickit" -t "$(date +"%d %b %Y, %H:%M")" -p
 
       - name: Create release
         if: ${{ startsWith(github.event.head_commit.message, 'release') }}

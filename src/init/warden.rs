@@ -5,8 +5,9 @@
 
 extern crate nix;
 
-use kickit::{wrap, oncelock, console::{Colour, Colourize, ReturnError, HandleError}, BoxedStr};
-use nix::{mount::{MsFlags as Flag, mount}, sched::CloneFlags as NixFlag};
+use kickit::{wrap, oncelock, console::prelude::*, init::service::sandbox::{NsFlag, NsFlags}, BoxedStr};
+
+use nix::{mount::{MsFlags as Flag, mount}};
 use std::{fmt::Display, path::PathBuf, io, process::{Command, Child, exit}};
 
 // A standard type, for anything that can be displayed
@@ -36,57 +37,10 @@ pub struct BindMounts
   dirs: Vec<BoxedStr>
 }
 
-// Pretty wrapper over `nix::sched::CloneFlags`
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum NsFlag
-{
-  // Share memory space between caller and child
-  ShareVm = NixFlag::CLONE_VM.bits() as isize,
-  // Share System-V semaphore adjustment values between caller and child
-  ShareVSem = NixFlag::CLONE_SYSVSEM.bits() as isize,
-  // Share filesystem info between caller and child
-  ShareFs = NixFlag::CLONE_FS.bits() as isize,
-  // Share file-descriptor table between caller and child
-  ShareFiles = NixFlag::CLONE_FILES.bits() as isize,
-  // Share the signal handler between caller and child
-  ShareSignalHandler = NixFlag::CLONE_SIGHAND.bits() as isize,
-  // Tracing process cannot call ptrace on child process
-  ShareUntraced = NixFlag::CLONE_UNTRACED.bits() as isize,
-  // If caller is being traced, then child will be as well
-  SharePTrace = NixFlag::CLONE_PTRACE.bits() as isize,
-  // Execution of the caller is suspended until child releases its virtual memory via `execve` or `_exit`
-  ShareVFork = NixFlag::CLONE_VFORK.bits() as isize,
-  // The parent of the new child is the same as the caller's
-  ShareParent = NixFlag::CLONE_PARENT.bits() as isize,
-  // Share thread group between caller and child
-  ShareThread = NixFlag::CLONE_THREAD.bits() as isize,
-  // Share input/output context between caller and child
-  ShareIo = NixFlag::CLONE_IO.bits() as isize,
-  // The child will be started in a new mount namespace, seperate mount types from root & container
-  NewMount = NixFlag::CLONE_NEWNS.bits() as isize,
-  // The child will be created in a new cgroup namespace
-  NewCGroup = NixFlag::CLONE_NEWCGROUP.bits() as isize,
-  // Create child in a new UTS namespace
-  NewUts = NixFlag::CLONE_NEWUTS.bits() as isize,
-  // Create child in a new IPC namespace
-  NewIpc = NixFlag::CLONE_NEWIPC.bits() as isize,
-  // Create child in a new user namespace
-  NewUser = NixFlag::CLONE_NEWUSER.bits() as isize,
-  // Create child in a new PID namespace
-  NewPid = NixFlag::CLONE_NEWPID.bits() as isize,
-  // Create child in a new network namespace
-  NewNetwork = NixFlag::CLONE_NEWNET.bits() as isize
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
-pub struct NsFlags(i32);
-
 // This is for nix library mount call, where a referenced option path is expected
 const NONE: Option<&PathBuf> = None;
 
 wrap! {
-  // C-style flags, wrapper to `nix::mount::MsFlags`
-  impl Deref<Target = i32> for NsFlags;
   // Unwrap the error so we can display it when we call `fatal!()`
   impl<Inner: Display> Deref<Target = Inner> for Error;
 }
@@ -94,9 +48,9 @@ wrap! {
 // Global options, set only if the user provides the argument
 oncelock! {
   // Mount the system pseudo filesystems, required for some commands to run properly
-  static MOUNT_SYSTEM_FS: bool;
+  static MOUNT_SYSTEM_FS: OnceLock<bool>;
   // Link the dbus run socket to the container
-  static LINK_DBUS: bool;
+  static LINK_DBUS: OnceLock<bool>;
 }
 
 trait StandardizeError<OkType, ErrorType: Display>
@@ -177,7 +131,7 @@ fn usage()
   exit(0);
 }
 
-fn listFlags()
+fn list_flags()
 {
   use kickit::delim_iter;
 
@@ -290,13 +244,13 @@ impl Sandbox<'_>
     if (*oncelock!(&MOUNT_SYSTEM_FS.unwrap_or(false)))
     {
       // These are universal pseudo flags that are applied to sys, dev and proc
-      let sys = Flag::MS_BIND | Flag::MS_PRIVATE | Flag::MS_NOSUID | Flag::MS_NOEXEC | Flag::MS_SILENT;
+      let sys = Flag::MS_NOSUID | Flag::MS_NOEXEC;
       let tmp = Flag::MS_NOSUID | Flag::MS_NODEV;
 
       // Mount system pseudo-filesystems
-      mount(Some("/sys"), format!("{root}/sys").as_str(), NONE, sys | Flag::MS_NODEV, NONE)?;
-      mount(Some("/proc"), format!("{root}/proc").as_str(), NONE, sys | Flag::MS_NODEV, NONE)?;
-      mount(Some("/dev"), format!("{root}/dev").as_str(), NONE, sys, NONE)?;
+      mount(Some("sysfs"), format!("{root}/sys").as_str(), Some("sysfs"), sys | Flag::MS_NODEV, NONE)?;
+      mount(Some("proc"), format!("{root}/proc").as_str(), Some("proc"), sys | Flag::MS_NODEV, NONE)?;
+      mount(Some("devtmpfs"), format!("{root}/dev").as_str(), Some("devtmpfs"), sys, NONE)?;
       mount(Some("tmpfs"), format!("{root}/tmp").as_str(), Some("tmpfs"), tmp, NONE)?;
       mount(Some("tmpfs"), format!("{root}/run").as_str(), Some("tmpfs"), tmp, NONE)?;
 
@@ -352,7 +306,8 @@ impl Sandbox<'_>
 
     unmount.extend(self.bind.files.iter().map(|s| (&**s).into()));
     unmount.extend(self.bind.dirs.iter().map(|s| (&**s).into()));
-    unmount.push(PathBuf::from(format!("{}/{}", self.root.display(), Self::DYNAMIC_LD).as_str()));
+    // Unmount the dynamic linker, this is always binded for every program
+    unmount.push(Self::DYNAMIC_LD.into());
 
     for dest in unmount
     {
@@ -363,53 +318,12 @@ impl Sandbox<'_>
   }
 }
 
-impl From<NsFlag> for NixFlag
-{
-  fn from(flag: NsFlag) -> Self
-  {
-    Self::from_bits_truncate(flag as i32)
-  }
-}
-
-impl From<NsFlags> for NixFlag
-{
-  fn from(flags: NsFlags) -> Self
-  {
-    NixFlag::from_bits_truncate(*flags)
-  }
-}
-
-impl NsFlag
-{
-  pub const FLAGS: [&str; 18] = ["ShareVm", "ShareVSem", "ShareFs", "ShareFiles", "ShareSignalHandler", "ShareUntraced",
-                                  "SharePTrace", "ShareVFork", "ShareParent", "ShareThread", "ShareIo", "NewMount",
-                                  "NewCGroup", "NewUts", "NewIpc", "NewUser", "NewPid", "NewNetwork"];
-
-  pub fn new(input: impl AsRef<str>) -> Option<Self>
-  {
-    use kickit::enum_from_str;
-
-    enum_from_str!(input.as_ref() => ShareVm | ShareVSem | ShareFs | ShareFiles | ShareSignalHandler | ShareUntraced
-              | SharePTrace | ShareVFork | ShareParent | ShareThread | ShareIo | NewMount | NewCGroup | NewUts
-              | NewIpc | NewUser | NewPid | NewNetwork)
-  }
-}
-
-impl NsFlags
-{
-  pub fn push(&mut self, add: NsFlag)
-  {
-    self.0 += add as i32;
-  }
-}
-
 fn main()
 {
-  use kickit::TrashUnused;
   use std::env::args;
 
   let mut argIter = args();
-  argIter.next().trash();
+  argIter.next();
 
   macro_rules! next
   {
@@ -424,7 +338,7 @@ fn main()
   {
     { $lock: ident = $val: expr } =>
     {{
-      $lock.set($val).map_err(|_| fatal!("Failed to set an argument's value!")).trash();
+      $lock.set($val).map_err(|_| fatal!("Failed to set an argument's value!"));
     }};
   }
  
@@ -439,7 +353,7 @@ fn main()
     match (arg.as_str())
     {
       "-h" | "--help" | "help" => usage(),
-      "-l" | "--list" => listFlags(),
+      "-l" | "--list" => list_flags(),
       "-b" | "--bind-file" => bindFiles.push(next!(argIter).into()),
       "-B" | "--bind-dir" => bindDirs.push(next!(argIter).into()),
       "-S" | "--mount-system-fs" => set! { MOUNT_SYSTEM_FS = true },

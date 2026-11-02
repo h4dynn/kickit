@@ -1,10 +1,10 @@
 //! Target configuration file sourcing
 
-use crate::{oncelock, init::console::Result, path, file_path};
+use crate::init::console::prelude::*;
 
 oncelock! {
-  // Once the target is sourced its configuration will be stored here
-  pub static TARGET: Target;
+  /// Globally shared target configuration, sourced early in kickit's execution
+  pub static TARGET: OnceLock<Target>;
 }
 
 // Used for toml::from_str, the optional values have defaults to fallback to
@@ -28,33 +28,34 @@ pub struct Target
   // The system's hostname, will be localhost if not set
   pub hostname: String,
   // Store kickit's run assets in permanent storage for debugging
-  pub debugDump: bool,
+  pub debug_dump: bool,
   // How long we are willing to wait for a RunOnce service to start
-  pub serviceTimeout: u64
+  pub service_timeout: u64
 }
 
 mod Defaults
 {
   // Default options
   pub const HOSTNAME: &str = "localhost";
-  pub const SERVICE_TIMEOUT_SEC: u64 = 5;
+  pub const SERVICE_TIMEOUT_SECONDS: u64 = 5;
 }
 
 /**
   * # Errors
   *
-  * - The matching configuration file for the target doesn't exist,
-  * - The configuration file couldn't be parsed (usually for bad syntax),
-  * - No services were provided in the configuration
+  * * The matching configuration file for the target doesn't exist
+  *
+  * * The configuration file couldn't be parsed (usually for bad syntax)
+  *
+  * * No services were provided in the configuration
  **/
 pub fn source(name: String) -> Result<Target>
 {
-  use crate::{console::ErrorResult, init::console::Error};
   use std::fs;
 
   // Read toml contents from target config to string
-  let targetToml = fs::read_to_string(file_path!(path!(crate::PREFIX, "target"), &name, "toml"))
-                    .into_trace(Error::TargetNotFound)?;
+  let targetToml = fs::read_to_string(path!(crate::PREFIX, "target", format!("{name}.toml")))
+                      .into_trace(Error::TargetNotFound).subject(&name)?;
 
   // Source the configuration
   let target: Config = toml::from_str(&targetToml).into_trace(Error::TargetParse)?;
@@ -63,15 +64,13 @@ pub fn source(name: String) -> Result<Target>
 
   // Set our target values or the default if not specified in sourced config
   let hostname = target.hostname.unwrap_or(String::from(Defaults::HOSTNAME));
-  let debugDump = target.debug_dump.unwrap_or_default();
-  let serviceTimeout = target.service_timeout.unwrap_or(Defaults::SERVICE_TIMEOUT_SEC);
+  let debug_dump = target.debug_dump.unwrap_or_default();
+  let service_timeout = target.service_timeout.unwrap_or(Defaults::SERVICE_TIMEOUT_SECONDS);
 
   if (target.debug_dump == Some(true) && !cfg!(debug_assertions))
   {
-    use crate::{init::console::warn, console::Colour};
-    // This will have no effect on release builds
-    warn!("debug dump is enabled in target '{name}', but you are using a release build");
+    warn!("`debug_dump` configuration option has no effect on release builds");
   }
 
-  Ok(Target { name, services, hostname, debugDump, serviceTimeout })
+  Ok(Target { name, services, hostname, debug_dump, service_timeout })
 }

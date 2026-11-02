@@ -6,8 +6,7 @@
 extern crate chrono;
 
 use std::fmt;
-use kickit::{console::{HandleError, Colour, Colourize, ExtendWithContext}, socket::{Core, Log, Power},
-              ktctl::{console::{StdResult, Result, Error}, socket::Request},
+use kickit::{console::prelude::*, socket::{Core, Log, Power}, ktctl::{console::prelude::*, socket::Request},
               console::{guard, ErrorResult}, binary, state::InitState};
 
 // Dummy structure
@@ -81,14 +80,14 @@ impl fmt::Display for Usage
           "Manage the kickit init system",
           '\n',
           "Actions:".bold(),
-          " help                       Show this help prompt or prompt for an action",
+          " help                       Usage information for ktctl or one of its actions",
           " version                    Version of this ktctl",
-          " service [SERVICEs]         List all services or selected services",
-          " log (--init) SERVICE       Read a service's logs",
+          " service [SERVICEs]         List services & their fields",
+          " log SERVICE                View a service's logs, or the init's master log",
           " state                      Current state of the init system",
-          " target                     Show current loaded target",
-          " shutdown [--force]         Shutdown this device safely",
-          " reboot [--force]           Reboot this device safely",
+          " target                     View the currently loaded target",
+          " shutdown [--force]         Shut down system",
+          " reboot [--force]           Reboot system",
           '\n',
           "Try 'ktctl help [ACTION]' for more info"
         )
@@ -134,8 +133,7 @@ impl Init
   pub async fn pid() -> Result<u32>
   {
     // Response should be 4 bytes (u32, in little endian byte order, so reverse)
-    let bytes: [u8; 4] = Core.request(Core::PID).await??
-                            .try_into()
+    let bytes: [u8; 4] = Core.request(Core::PID).await??.try_into()
                             .map_err(|_| Error::Format.trace("invalid init pid!"))?;
 
     Ok(u32::from_le_bytes(bytes))
@@ -143,60 +141,41 @@ impl Init
 
   pub async fn state() -> InitState
   {
-    use InitState::{Okay, Down, Emergency, Stalled};
+    // Make sure the init and ktctl are of the same version to avoid any potential compatiblity issues
+    if (Core.request(Core::VERSION).await != Ok(Ok(format!("{}\n", env!("CARGO_PKG_VERSION")).into_bytes())))
+    {
+      return InitState::Down;
+    }
 
     if let Ok(Ok(state)) = Core.request(Core::STATE).await
     {
-      // Convert the state from a u8 byte to an InitState
-      match (state[0].into())
-      {
-        Okay => {
-          /*
-           * Make sure the version of `ktctl` and `kickit` match to avoid
-           * potential compatibility issues
-           */
-          if let Ok(Ok(version)) = Core.request(Core::VERSION).await &&
-              (version.as_slice() == format!("{}\n", env!("CARGO_PKG_VERSION")).as_bytes())
-          {
-            return Okay
-          }
-        },
-        // No further checks need to be done here
-        Emergency | Stalled => return state[0].into(),
-        // Falls down to the end of the function
-        Down => ()
-      }
+      state[0].into()
     }
-    Down
+    else {
+      InitState::Down
+    }
   }
 
   // Print the state in a pretty way
   #[inline]
   pub async fn prettyState() -> Result<()>
   {
-    use InitState::{Okay, Down, Emergency, Stalled};
+    use InitState::{Okay, Down, Stalled};
 
     let state = Self::state().await;
     // Matching colour for our init state (e.g. up / running = Green)
-    let colour = match (state)
-    {
-      Emergency | Down => Colour::Red,
-      Stalled => Colour::Orange,
-      Okay => Colour::Green
-    };
+    let colour = match (state) { Okay => Colour::Green, Stalled => Colour::Orange, _ => Colour::Red };
 
-    /*
-     * Request the init PID from the socket, this is how we test if kickit
-     * is running as the init process or not
-     */
-    let pid = Init::pid().await?;
-
-    if (pid == 1)
+    if (state == Down)
     {
-      println!("{}", state.colour(colour));
+      println!("{}", Down.colour(Colour::Red));
     }
     else {
-      println!("{} (pid: {})", state.colour(colour), pid);
+      match (Init::pid().await?)
+      {
+        1 => println!("{}", state.colour(colour)),
+        not_init => println!("{} (pid: {not_init})", state.colour(colour))
+      }
     }
 
     Ok(())
@@ -260,7 +239,7 @@ impl Operation
   async fn targetInfo() -> Result<()>
   {
     // Read target name from the socket, and format as a String
-    print!("{}", String::from_utf8(Core.request(Core::TARGET).await??).into_trace(Error::Format).context("target")?);
+    print!("{}", String::from_utf8(Core.request(Core::TARGET).await??).into_trace(Error::Format).subject("target")?);
     Ok(())
   }
 
@@ -323,17 +302,9 @@ impl RunOperation for Operation
     match (self)
     {
       Help(..) => self.help(),
-      Version =>
-      {
-        Self::version();
-        Ok(())
-      },
+      Version => { Self::version(); Ok(()) },
       ServiceList(services) => serviceList(services.as_deref()),
-      Log(name, ugly, ignoreInit) =>
-      {
-        let service = PartialService::import(&name)?;
-        service.logs(ugly, ignoreInit)
-      },
+      Log(name, ugly, ignoreInit) => PartialService::import(&name)?.logs(ugly, ignoreInit),
       InitLog => Init::readLog().await,
       State => Init::prettyState().await,
       TargetInfo => Self::targetInfo().await,

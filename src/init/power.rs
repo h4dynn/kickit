@@ -1,13 +1,14 @@
-//! power.rs - Shutdown & reboot safely
+/*!
+ * Backend power-off operations implemented behind a socket
+ */
 
 use std::convert::Infallible;
-use crate::console::ErrorResult;
-use super::{PID, oncelock, console::{Error, Result}};
+use crate::init::console::prelude::*;
 use nix::sys::reboot::RebootMode;
 
 oncelock! {
-  // Tells the service watcher to not care if a service is killed, set by `poweroff(_, _)`
-  pub static POWER_OFF_READY: bool;
+  /// Modify service supervisor behavior to allow service process to die
+  pub static POWER_OFF_READY: OnceLock<bool>;
 }
 
 pub enum Mode
@@ -36,7 +37,7 @@ impl Into<RebootMode> for Mode
   *
   * * Failed to power-off/reboot with `nix::sys::reboot::reboot`
   */
-pub fn forcePoweroff(mode: Mode) -> Result<Infallible>
+pub fn force_poweroff(mode: Mode) -> Result<Infallible>
 {
   use nix::sys::reboot::reboot;
 
@@ -47,59 +48,70 @@ pub fn forcePoweroff(mode: Mode) -> Result<Infallible>
 /**
   * # Errors
   *
-  * * Failed to get the `init::SERVICE_WATCHERS` oncelock since it isn't set,
-  * * Failed to read from /run/kickit/service,
-  * * Failed to parse the PID file as it isn't numeric,
+  * * Failed to get the `init::SERVICE_WATCHERS` oncelock since it isn't set
+  *
+  * * Failed to read from /run/kickit/service
+  *
+  * * Failed to parse the PID file as it isn't numeric
+  *
   * * Failed to kill a service
+  *
   * * Failed to reboot with `nix::sys::reboot::reboot`
   */
 pub fn poweroff(mode: Mode) -> Result<Infallible>
 {
-  use crate::{continueif, console::{Colour, HandleError, ReturnError}};
-  use super::{mount::{unmount, unmountFlags, UnmountFlag::Lazy}, service::STANDARD_SERVICES, console::{status, warn}};
+  use crate::{init::{init_guard, mount::{mounttab, unmount_flags}, service::STANDARD_SERVICES}};
   use nix::sys::reboot::reboot;
   use std::{fs, path::PathBuf, process};
 
-  let noInit = oncelock!(&PID)?.is_some();
+  macro_rules! any_path
+  {
+    ($lhs: expr, $($rhs: literal)|*) =>
+    {
+      $($lhs.as_path() == <std::path::Path>::new($rhs))||*
+    };
+  }
+
   // This makes sure that when we kill the services, the service manager doesn't throw an error
   oncelock! { POWER_OFF_READY = true }?;
 
-  for service in (oncelock!(&STANDARD_SERVICES)?)
+  // If an error has occurred during service startup, we need to still be able to accept poweroff calls without error
+  if let Some(services) = STANDARD_SERVICES.get()
   {
-    status!("Killing service: {}", service.name);
-    service.down()?;
+    for service in services
+    {
+      status!("Killing service: {}", service.cfg.name);
+      debug_cc!(&service);
+
+      // This is the only instance where the down method should ever be called
+      service.down()?;
+    }
+  }
+  else {
+    warn!("Standard services have not been initialized yet");
   }
 
-  for mountInfoString in (fs::read_to_string("/proc/mounts").into_trace(Error::ProcFs)?.lines())
+  for entry in (mounttab()?)
   {
-    // Split for each space found & get the 2nd element (1st in this case since indices starts at 0)
-    let mountpoint = mountInfoString.split_ascii_whitespace().nth(1)
-                        .ok_or(Error::ProcFs.trace("Missing mountpoint specifier in /proc/mounts"))?;
-
     // Do not touch any other mountpoints outside of kickit's scope if we are not the init process
-    continueif! (noInit && !mountpoint.starts_with("/run/kickit/"));
+    continueif! (init_guard() && !entry.dest().starts_with("/run/kickit/"));
 
-    match (mountpoint)
+    // These are special system filesystems, unmounting them would be bad
+    if (!any_path!(entry.dest(), "/dev" | "/dev/pts" | "/proc" | "/sys" | "/sys/fs/cgroup" | "/run"))
     {
-      // These are special system filesystems, unmounting them would be bad
-      "/dev" | "/dev/pts" | "/proc" | "/sys" | "/sys/fs/cgroup" | "/run" => (),
-      // Hopefully safe to unmount
-      _ =>
-      {
-        status!("Unmounting filesystem: {mountpoint}");
+      status!("Unmounting filesystem: {}", entry.dest().display());
 
-        if let Err(error) = (unmount(mountpoint, None))
-        {
-          error.warn();
-          warn!("Failed to unmount filesystem, it will be lazily unmounted: {mountpoint}");
-          // We don't want to do this but this is a last resort
-          unmount(mountpoint, Some(unmountFlags!(Lazy))).or_warn();
-        }
+      if let Err(error) = entry.unmount(None)
+      {
+        error.warn();
+        warn!("Failed to unmount filesystem, it will be lazily unmounted");
+        // We don't want to do this but this is a last resort
+        entry.unmount(Some(unmount_flags![Lazy])).or_warn();
       }
     }
   }
 
-  if (noInit)
+  if (init_guard())
   {
     // Just kill kickit & nothing else, since we are not the init system
     status!("Stopping kickit now");
@@ -107,8 +119,7 @@ pub fn poweroff(mode: Mode) -> Result<Infallible>
     fs::remove_dir_all(PathBuf::from("/run/kickit")).into_trace(Error::Shutdown)?;
     process::exit(0);
   }
-  else {
-    // Poweroff/reboot!!!!
-    reboot(mode.into()).into_trace(Error::PowerCritical)
-  }
+
+  // System call to poweroff/reboot
+  reboot(mode.into()).into_trace(Error::PowerCritical)
 }

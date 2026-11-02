@@ -12,6 +12,9 @@
 - [x] Add option to create directories in /run for
       services
 
+- [ ] Add seperate, restricted user-level services (akin
+      to systemd's)
+
 - [ ] Sandbox's `NewUser` flag needs uid/gid map
       implementation to work properly
 

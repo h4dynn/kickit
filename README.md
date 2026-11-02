@@ -1,3 +1,4 @@
+<!-- Include the logo, this can be done with just markdown but HTML allows centring & custom size -->
 <p align="center"><img src="assets/logo.svg" alt="kickit" width="500"/></p>
 
 **An immutable init system with support for sandboxed services**
@@ -8,7 +9,7 @@
 ![Lint](https://github.com/h4dynn/kickit/actions/workflows/lint.yml/badge.svg)
 ![Nightly Lint](https://github.com/h4dynn/kickit/actions/workflows/nightly-lint.yml/badge.svg)
 
-# Why?
+# Rationale
 
 ### Immutability
 
@@ -46,9 +47,11 @@ this is purely hypothetical, not backed up by any real life examples)
 
 # Design
 
-`kickit` can be ran as the init, or alongside another init system,
-like `systemd` or really any other as long as you make a service
-for it!
+`kickit` does not aim to be a replacement for any existing init
+system, it intends to be its own thing entirely.
+
+It can be ran as the init, or alongside another init system, like
+`systemd` or really any other as long as you make a service for it!
 
 I highly recommend if you are going to try this thing out, to try
 it alongside your existing init system before using as the init.
@@ -68,7 +71,6 @@ there are service files for `systemd` and `runit` as of current.
 # Building
 
 See [Building.md](https://github.com/h4dynn/kickit/blob/main/docs/Building.md)
-for more information on how to build kickit
 
 
 [^1]: See [TO-DO.md](https://github.com/h4dynn/kickit/blob/main/TO-DO.md)
@@ -76,19 +78,19 @@ for the current state of the project
 
 # Thanks to...
 
-* [rust](https://rust-lang.org/): The language exclusively used
+* [rust](https://rust-lang.org/) - The language exclusively used
   by kickit
 
-* [the nix crate](https://crates.io/crates/nix): Linux libc
+* [the nix crate](https://crates.io/crates/nix) - Linux libc
   bindings in Rust
 
-* [tokio](https://tokio.rs/): Easy & efficient asynchronous
+* [tokio](https://tokio.rs/) - Easy & efficient asynchronous
   programming in Rust
 
-* [the toml crate](https://crates.io/crates/toml): Rust platform
+* [the toml crate](https://crates.io/crates/toml) - Rust platform
   for Tom's Obvious Markup Language
 
-* [ruzstd](https://crates.io/crates/ruzstd): Rust implementation
+* [ruzstd](https://crates.io/crates/ruzstd) - Rust implementation
   of Zstandard compression
 
 * [chrono](https://crates.io/crates/chrono) - Timestamp handling

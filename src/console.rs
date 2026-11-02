@@ -2,15 +2,23 @@
 
 use std::{fmt, fmt::Display, ops::Deref};
 
+pub mod prelude
+{
+  pub use super::{ReturnError, HandleError, ErrorResult, ExtendWithSubject, guard, Colour, Colourize,
+                    FmtStr, FmtString};
+}
+
 /*
- * Implementation for throwing an error with a trace (ErrorTrace) or
- * without a trace (Error)
+ * Error handling helpers
+ * ======================
  */
+
+/// Implementation for throwing an error with a trace (`ErrorTrace`) or without a trace (`Error`)
 pub trait ReturnError
 {
-  // The ! return type shows that fatal() should never end up returning
+  /// The ! return type shows that `fatal` should never end up returning
   fn fatal(self) -> !;
-  // For non-fatal errors only
+  /// For non-fatal errors only
   fn warn(self);
 }
 
@@ -19,71 +27,80 @@ pub trait HandleError: Sized
   type OkType;
   type ErrorType: ReturnError;
 
-  // handle() functions like unwrap(): Return contents if OK or fatal if not
+  /// This functions like `unwrap`: Return contents if OK or handle error (`Error::fatal`) if Err
   fn handle(self) -> Self::OkType;
-
-  // Warn on error, if an error occurs `None` is returned, if not then `Some` instead
+  /// Warn on error, if an error occurs `None` is returned, if not then `Some` instead
   fn or_warn(self) -> Option<Self::OkType>;
 }
 
-/*
- * Addon more context to an error for diagnostics, this is usually the name of something,
- * i.e., if an error occurs with a specific service we add the service's name as context
- */
-pub trait ExtendWithContext<OkType, ErrType>
+pub trait AssessError<OkType, ErrType>
 {
+  /// Do not return an error if `optional` is true
   /**
-    * Add context to an existing trace error
-    *
     * # Errors
-    * - Result is of error variant
+    *
+    * * If non-optional and of error kind, carry the error over to output
     */
-  fn context(self, context: impl Display) -> Result<OkType, ErrType>;
+  fn assess(self, optional: bool) -> Result<Option<OkType>, ErrType>;
 }
 
-/*
- * Convert a non-standard error input into an `ErrorTrace`. This is usually done on a
- * `Result<OkType, ...>` but can also be done on a `Option<...>` where we assume the
- * option's `Some` variant contains the error
- */
-pub trait ErrorResult<ErrKind: ReturnError, ErrOutput: ReturnError, OkType, ErrType: Display>
+/**
+  * Addon more subject to an error for diagnostics, this is usually the name of something,
+  * i.e., if an error occurs with a specific service we add the service's name as subject
+  */
+pub trait ExtendWithSubject<OkType, ErrType>
 {
   /**
-    * Convert an error to a trace without context
+    * Add subject to an existing trace error
     *
     * # Errors
-    * - Data type contains an error (e.g. Result is Err(..))
+    *
+    * * Result is of error variant
+    */
+  fn subject(self, subject: impl Display) -> Result<OkType, ErrType>;
+}
+
+/**
+  * Convert a non-standard error input into an `ErrorTrace`. This is usually done on a
+  * `Result<T, E>` but can also be done on a `Option<E>` where we assume the option's
+  * `Some` variant contains the error
+  */
+pub trait ErrorResult<ErrKind: ReturnError, ErrOutput: ReturnError, OkType, ErrType: Display>
+{
+  /// Convert an error to a trace without subject
+  /**
+    * # Errors
+    *
+    * * Data type contains an error (e.g. Result is Err(..))
     */
   fn into_trace(self, kind: ErrKind) -> Result<OkType, ErrOutput>;
 }
 
+/*
+ * Text formatting & colouring
+ * ===========================
+ */
+
 pub trait Colourize: Display + Sized
 {
-  /*
-   * Create a new coloured instance from an existing displayable type, this is one of
-   * two ways you can go:
-   *
-   * `FmtString::from("hello world!").bold()` -> Creates a non-coloured instance, then
-   *   colours it (inefficient)
-   *
-   * or
-   * 
-   * `"hello world!".bold()` -> Creates a new coloured instance (better)
-   */
+  /// Colour a string-like type
   fn colour(self, colour: Colour) -> FmtString
   {
     FmtString { colours: vec![colour], inner: self.to_string(), dont_reset: false }
   }
 
+  /// Alias to `self.colour(Colour::Bold)`
   fn bold(self) -> FmtString
   {
     self.colour(Colour::Bold)
   }
 }
 
-#[derive(Copy, Clone, Debug, derive_more::Display)]
+/// Colours & stylizing options (reset/bold)
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Default, derive_more::Display)]
 pub enum Colour
 {
+  #[default]
   #[display("\x1b[0m")]
   Reset,
   #[display("\x1b[1m")]
@@ -96,7 +113,8 @@ pub enum Colour
   Green
 }
 
-#[derive(Debug, Default)]
+/// A borrowed version of the [`FmtString`], like how [`&str`] is to [`String`]
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Default)]
 pub struct FmtStr<'inner>
 {
   colours: &'inner [Colour],
@@ -104,7 +122,12 @@ pub struct FmtStr<'inner>
   dont_reset: bool
 }
 
-#[derive(Clone, Debug, Default)]
+/**
+  * An owned form of a coloured string (borrowed form: [`FmtStr`])
+  *
+  * Unlike a [`String`] from the std library, these cannot be resized as they use the [`Box`] type
+  */
+#[derive(PartialEq, Eq, Clone, Debug, Default)]
 pub struct FmtString
 {
   colours: Vec<Colour>,
@@ -192,7 +215,7 @@ impl FmtStr<'static>
 
 impl FmtStr<'_>
 {
-  // Copy into a new owned formatted string instance
+  /// Copy reference behind 
   #[must_use]
   pub fn to_owned(self) -> FmtString
   {
@@ -305,19 +328,34 @@ impl<F: ReturnError> HandleError for Option<F>
   }
 }
 
+impl<S, F: ReturnError> AssessError<S, F> for Result<S, F>
+{
+  fn assess(self, optional: bool) -> Result<Option<S>, F>
+  {
+    match (self)
+    {
+      // We have a value to return here
+      Ok(ok) => Ok(Some(ok)),
+      // Everything is okay but we don't have a value
+      Err(err) if (optional) => { err.warn(); Ok(None) },
+      Err(err) => Err(err)
+    }
+  }
+}
+
 impl<Displayable: Display + Sized> Colourize for Displayable {}
 
-// An error type, this is just a lot of boilerplate so we can simplify this with a macro
+/// Error type definition in macro to reduce boilerplate
 #[macro_export]
-macro_rules! error
+macro_rules! error_ty
 {
   {
     $(#[$attr: meta])*
     $vis: vis enum Error $(<$($generic: ident $(: $($depend: ty),*)?),*>)?
     {
       $(
-        $(#[$variantAttr: meta])*
-        $variant: ident $(<$($variantGeneric: ident $(: $($variantDepend: ty),*)?),*>)?
+        $(#[$v_attr: meta])*
+        $variant: ident $(<$($v_generic: ident $(: $($v_depend: ty),*)?),*>)?
       ),*
     }
   } => {
@@ -329,18 +367,18 @@ macro_rules! error
     $vis enum Error $(<$($generic $(: $($depend),*)?),*>)?
     {
       $(
-        $(#[$variantAttr])*
-        $variant $(<$($variantGeneric $(: $($variantDepend),*)?),*>)?
+        $(#[$v_attr])*
+        $variant $(<$($v_generic $(: $($v_depend),*)?),*>)?
       ),*
     }
 
-    // This stores an error (in kind) and an error trace/"context" (in trace)
+    // This stores an error (in kind) and an error trace/"subject" (in trace)
     #[derive(PartialEq, Eq, Clone, Debug)]
     #[must_use]
     $vis struct ErrorTrace
     {
       pub kind: Error,
-      pub context: Option<String>,
+      pub subject: Option<String>,
       pub trace: String
     }
 
@@ -404,34 +442,35 @@ macro_rules! error
     {
       pub fn trace(self, trace: impl Display) -> ErrorTrace
       {
-        ErrorTrace { kind: self, context: None, trace: trace.to_string() }
+        ErrorTrace { kind: self, subject: None, trace: trace.to_string() }
       }
     }
 
     impl ErrorTrace
     {
-      pub fn context(self, context: impl Display) -> Self
+      pub fn subject(self, subject: impl Display) -> Self
       {
-        Self { kind: self.kind, context: Some(context.to_string()), trace: self.trace }
+        Self { kind: self.kind, subject: Some(subject.to_string()), trace: self.trace }
       }
     }
 
-    // If this `Result` is of `Err` variant, add some context to it
-    impl<OkType> ExtendWithContext<OkType, ErrorTrace> for Result<OkType>
+    // If this `Result` is of `Err` variant, add some subject to it
+    impl<OkType> ExtendWithSubject<OkType, ErrorTrace> for Result<OkType>
     {
-      fn context(self, context: impl Display) -> Result<OkType>
+      fn subject(self, subject: impl Display) -> Result<OkType>
       {
         match (self)
         {
           Ok(ok) => Ok(ok),
-          Err(err) => Err(ErrorTrace { kind: err.kind, context: Some(context.to_string()), trace: err.trace })
+          Err(err) => Err(ErrorTrace { kind: err.kind, subject: Some(subject.to_string()), trace: err.trace })
         }
       }
     }
   };
 }
-pub use crate::error as error;
+pub use crate::error_ty as error_ty;
 
+/// Safeguards to throw errors on certain evaluations
 #[macro_export]
 macro_rules! guard
 {

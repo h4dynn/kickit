@@ -15,7 +15,7 @@ pub enum InitState
   Down = 0x20
 }
 
-// Setup a global mutex for the state, this can change once locked
+/// Setup a global mutex for the init's state, which is thread-safe & mutable
 pub static INIT_STATE: Mutex<InitState> = Mutex::new(InitState::Okay);
 
 impl From<u8> for InitState
@@ -51,15 +51,7 @@ impl InitState
 #[macro_export]
 macro_rules! state
 {
-  () =>
-  {
-    {
-      /*
-       * There is no need to drop the Mutex because it will auto-drop as
-       * soon as the macro goes out-of-scope
-       */
-      *$crate::state::INIT_STATE.lock().unwrap()
-    }
-  };
+  // There is no need to drop the Mutex because it will auto-drop at the end of this block
+  () => {{ *$crate::state::INIT_STATE.lock().unwrap() }};
 }
 pub use crate::state as state;

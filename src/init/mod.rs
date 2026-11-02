@@ -1,4 +1,6 @@
-//! init process
+/*!
+ * Components of the backend init system
+ */
 
 extern crate tokio;
 extern crate serde;
@@ -12,51 +14,60 @@ pub mod target;
 pub mod socket;
 pub mod power;
 
-use crate::{oncelock, console::ExtendWithContext};
-use self::console::{Error, Result};
-
-oncelock! {
-  // Some when `--no-init` arg is provided to kickit, safeguard to limit kickit's behaviour
-  pub static PID: Option<u32>;
-}
+use crate::AnyStr;
 
 // The ID of the "kickit-shell" user account, which an emergency shell is opened on
 pub const EMERGENCY_SHELL_UID: u32 = 490;
-// Path of the emergency shell to execute, some distros may not have bash installed by default
+// Path of the shell to execute in emergency, some distros may use lightweight shells like ash instead
 pub const EMERGENCY_SHELL: &str = "/bin/bash";
 
+/// Guard to prevent kickit from performing init tasks
 /**
-  * # Errors
+  * # Tasks
   *
-  * - /proc/cmdline couldn't be accessed for whatever reason,
-  * - Specified command-line param wasn't found
+  * Examples include mounting pseudo filesystems, setting the hostname, probing udev devices, mounting
+  * fstab entries), see the `kickit` binary source for all the operations prevented by the guard.
+  *
+  * # Condition
+  *
+  * This uses [`std::process::id`] to determine the PID, the init system's PID is always `1` as it is
+  * the 1st process executed by the kernel.
   */
-// Get a command-line parameter using the /proc/cmdline file
-#[inline]
-pub fn cmdline(param: impl AsRef<str>) -> Result<Option<String>>
+#[must_use]
+pub fn init_guard() -> bool
 {
-  use std::{fs, path::PathBuf};
-  use crate::console::ErrorResult;
+  std::process::id() != 1
+}
 
-  // Read the cmdline from procfs
-  let cmdline = fs::read_to_string(PathBuf::from("/proc/cmdline"))
-                    .into_trace(Error::FileNotFound).context("/proc/cmdline")?;
-
-  // Split the cmdline's parameters by spaces
-  for cmdlineParam in (cmdline.split(' '))
+/// Resolve kernel command-line flag- provided as single-word (e.g. `quiet`) or suffixed with `=true`
+pub fn cmdline_flag(id: impl AnyStr) -> bool
+{
+  if let Ok(cmdline) = std::fs::read_to_string("/proc/cmdline")
   {
-    // Parameter has a value to give
-    if let Some((key, value)) = cmdlineParam.trim_end_matches('\n').split_once('=') && (key == param.as_ref())
+    // Remove newline at the end (screws with evaluation) & read parameters delimited by whitespace
+    cmdline.trim_end_matches('\n').split(' ').any(|c| c == id.as_ref() || c == [id.as_ref(), "=true"].concat())
+  }
+  else {
+    false
+  }
+}
+
+/// Attempt to source kernel command-line option in string form
+pub fn cmdline_value(id: impl AnyStr) -> Option<String>
+{
+  if let Ok(cmdline) = std::fs::read_to_string("/proc/cmdline")
+  {
+    for param in (cmdline.trim_end_matches('\n').split(' '))
     {
-      return Ok(Some(value.to_owned()))
-    }
-    // No value, just bool parameter
-    else if (cmdlineParam == param.as_ref())
-    {
-      return Ok(None)
+      // Split string into two values from the first '=' if provided
+      if let Some((param_id, val)) = param.split_once('=') && param_id == id.as_ref()
+      {
+        // ID matches & value is available
+        return Some(String::from(val))
+      }
     }
   }
 
-  // Command-line parameter was not found at all
-  Err(Error::Cmdline.trace(param.as_ref()))
+  // Option not found in kernel cmdline
+  None
 }

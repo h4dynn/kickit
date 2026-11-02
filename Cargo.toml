@@ -1,6 +1,6 @@
 [package]
 name = "kickit"
-version = "26.7.1"
+version = "26.10.1"
 description = "A robust & simple init system"
 repository = "https://github.com/h4dynn/kickit"
 readme = "README.md"
@@ -43,6 +43,11 @@ bypass_init_check = []
 dhat_heap = ["dhat"]
 # Stable release
 stable = []
+# Include debugging information output to stderr
+debug_einfo = []
+
+# Code gated behind nightly compiler for unstable features
+rustc_nightly = []
 
 [[bin]]
 # The init program- install to /usr/lib/kickit/kickit & symlink to /usr/sbin/init

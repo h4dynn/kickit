@@ -1,9 +1,7 @@
 //! Service access from runfs
 
 use std::{fs, fs::File, boxed::Box, io, path::PathBuf};
-use super::{console::{Result, Error}};
-use crate::{console::{Colour, Colourize, ExtendWithContext, ErrorResult}, guard, path,
-              init::service::{Pattern, Pattern::Standard}, Data};
+use crate::{ktctl::console::prelude::*, init::service::{Pattern, Pattern::Standard}, Data};
 
 // This is only partial because we don't know everything about it
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -75,34 +73,27 @@ impl CacheInstance
   // Read 3 seperate bytes from cache, followed by 4 bytes of LE u32 bytes (pid)
   pub(super) fn new(mut source: impl io::Read) -> Result<Self>
   {
-    use crate::tern;
-
     /*
      * bytes => 2 bytes all of different types (pattern -> sandboxed),
      * pidRaw => PID in u32 LE byte order
      */
-    let (mut bytes, mut pidRaw, mut statusSwitch) = ([0u8; 2], [0u8; 4], [0u8; 1]);
+    let (mut bytes, mut pid_raw, mut status_switch) = ([0u8; 2], [0u8; 4], [0u8; 1]);
 
     source.read_exact(&mut bytes).into_trace(Error::ServiceConfig)?;
     // PID u32 bytes in little-endian order
-    source.read_exact(&mut pidRaw).into_trace(Error::ServiceConfig)?;
-    source.read_exact(&mut statusSwitch).into_trace(Error::ServiceConfig)?;
+    source.read_exact(&mut pid_raw).into_trace(Error::ServiceConfig)?;
+    source.read_exact(&mut status_switch).into_trace(Error::ServiceConfig)?;
 
     // Check the option switch to see if there is a status available for us
-    let status = tern!
+    let status = (status_switch[0] == 1).then_some(
     {
-      // The option switch - 1 is true, 0 is false
-      (statusSwitch[0] == 1) =>
-      {
-        // Exit status of this service in i32 LE bytes
-        let mut status = [0u8; 4];
-        source.read_exact(&mut status).into_trace(Error::ServiceConfig)?;
-        Some(i32::from_le_bytes(status))
-      },
-      _ => None
-    };
+      // Exit status of this service in i32 LE bytes
+      let mut status = [0u8; 4];
+      source.read_exact(&mut status).into_trace(Error::ServiceConfig)?;
+      i32::from_le_bytes(status)
+    });
 
-    Ok(Self { pattern: bytes[0], sandboxed: bytes[1], pid: u32::from_le_bytes(pidRaw), status })
+    Ok(Self { pattern: bytes[0], sandboxed: bytes[1], pid: u32::from_le_bytes(pid_raw), status })
   }
 
   pub(super) fn export(self) -> Result<(Pattern, bool, u32, Option<i32>)>
@@ -141,14 +132,16 @@ impl PartialService
   pub fn import(name: &str) -> Result<Self>
   {
     // Make sure the requested service actually exists for this init session
-    guard!(!path!("/run/kickit/service", name).is_dir() => Error::BadService.trace("No such file or directory").context(name));
+    guard!(!path!("/run/kickit/service", name).is_dir() =>
+            Error::BadService.trace("No such file or directory").subject(name));
 
     // Open the cached config file
-    let cacheFile = File::open(path!("/run/kickit/service", name, "config")).into_trace(Error::BadService).context(name)?;
-    let cache = CacheInstance::new(cacheFile).context(name)?;
+    let cache_file = File::open(path!("/run/kickit/service", name, "config"))
+                        .into_trace(Error::BadService).subject(name)?;
+    let cache = CacheInstance::new(cache_file).subject(name)?;
 
     // Convert values from raw byte to their types
-    let (pattern, sandboxed, pid, status) = cache.export().context(name)?;
+    let (pattern, sandboxed, pid, status) = cache.export().subject(name)?;
 
     Ok(Self { name: name.into(), pattern, sandboxed, status, pid })
   }
@@ -156,7 +149,8 @@ impl PartialService
   /**
     * # Errors
     *
-    * * Failed to get the proccess's stat path,
+    * * Failed to get the proccess's stat path
+    *
     * * Failed to get the service's PID
     *
     * # Panics
@@ -165,8 +159,6 @@ impl PartialService
     */
   pub fn print(self) -> Result<()>
   {
-    use crate::tern;
-
     println!("{}", (&self.name).bold());
     println!("├─ Status:    {}",
     {
@@ -228,27 +220,27 @@ impl PartialService
   /**
     * # Errors
     *
-    * * Failed to open the service's log file,
-    * * Failed to read from the log file,
-    * * Failed to parse i64 timestamp from String,
-    * * `chrono::DateTime::from_timestamp_millis` failed to parse the timestamp,
-    * * Failed to write the log's contents to stdout,
-    * * Unexpected init marker in wrong place on log line
+    * * Service's log file is not accessible (this should never be the case)
+    *
+    * * Encountered log entry with an invalid timestamp (should be in Unix millis)
+    *
+    * * Timestamp parsing failure in [`from_timestamp_millis`]
+    *
+    * * `stdout` console is not writable (TTY error, not kickit related)
+    *
+    * [`from_timestamp_millis`]: chrono::DateTime::from_timestamp_millis
     */
-  pub fn logs(&self, ugly: bool, ignoreInit: bool) -> Result<()>
+  pub fn logs(&self, ugly: bool, ignore_init: bool) -> Result<()>
   {
-    use std::{io, io::{BufReader, Write, ErrorKind::BrokenPipe}, mem::take, process::exit};
-    use crate::{tern, continueif, DumpVec, DequeData, init::service::Logger};
+    use std::{io, io::{BufReader, Write, ErrorKind::BrokenPipe}, process::exit};
+    use crate::{DumpVec, DequeData, init::service::logger::LogEntry};
     use ruzstd::decoding::StreamingDecoder;
     use chrono::{Local, DateTime};
 
-    // We can't use `Colour::Bold` in concat!() because it only accepts literals
-    const KICKIT_MARKER: &str = concat!("\x1b[1m", "(kickit) ", "\x1b[0m");
-
     // Open the zstd compressed log file
-    let file = File::open(self.path("log")).into_trace(Error::BadService).context(&self.name)?;
+    let file = File::open(self.path("log")).into_trace(Error::BadService).subject(&self.name)?;
     // The decoder implements Read to idiomatically decompress
-    let decoder = StreamingDecoder::new(file).into_trace(Error::LogAccessFail).context(&self.name)?;
+    let decoder = StreamingDecoder::new(file).into_trace(Error::LogAccessFail).subject(&self.name)?;
     // Use `BufReader` for the handy `read_until` method
     let log = BufReader::new(decoder);
 
@@ -259,61 +251,58 @@ impl PartialService
      * We don't uses the `lines()` method here because that creates a String but our entries contain binary data
      * so we need a vector of bytes instead
      */
-    for mut entry in (log.delimit(b'\n').map(|mut v| <DequeData as From<_>>::from(take(&mut v))))
+    for mut entry in (log.delimit(b'\n').map(|mut v| <DequeData as From<Data>>::from(std::mem::take(&mut v))))
     {
       // First 13 bytes will always be the timestamp
-      let timestampBytes: [u8; 13] = entry.dump_front();
+      let timestamp_raw: [u8; 13] = entry.dump_front();
       // The timestamp will be in a String
-      let timestampString = &str::from_utf8(timestampBytes.as_slice()).into_trace(Error::Format)?;
+      let ts = &str::from_utf8(timestamp_raw.as_slice()).into_trace(Error::Format)?;
 
-      let fromInit = (entry[0] == Logger::INIT_ENTRY);
+      let from_init = entry[0] == LogEntry::INIT_ENTRY;
 
-      if (fromInit)
+      if (from_init)
       {
         // Remove this byte now that we have parsed it
         entry.pop_front();
       }
 
-      continueif! (fromInit && ignoreInit);
+      continueif! (from_init && ignore_init);
 
-      // If this entry is from the init, add a marker
-      let marker = fromInit.then_some(tern! { ugly => "(kickit) ", _ => KICKIT_MARKER }).unwrap_or_default();
+      let marker = from_init.then_some(tern! { ugly => "(kickit) ", _ => "\x1b[1m(kickit) \x1b[0m" })
+                      .unwrap_or_default();
 
       // `entry` isn't used after this, so this resets it for the next iteration
-      let contents = String::from_utf8(take(&mut entry).into()).into_trace(Error::Format)?;
+      let contents = String::from_utf8(std::mem::take(&mut entry).into()).into_trace(Error::Format)?;
 
       let line = tern!
       {
-        ugly => format!("[{timestampString}] {marker}{contents}\n"),
+        ugly => format!("[{ts}] {marker}{contents}\n"),
         _ => {
           // Convert the millis type from a &str to i64 so it is accepted by chrono
-          let timestamp = timestampString.parse::<i64>().into_trace(Error::Format)?;
+          let timestamp: i64 = ts.parse().into_trace(Error::Format)?;
           /*
-           * Get the timestamp from the log and convert it into an actual date & time,
-           * then convert from UTC timezone to the system's timzone (Local) using
-           * the chrono crate magic
+           * Get the timestamp from the log and convert it into an actual date & time, then convert from
+           * UTC timezone to the system's timzone (Local) using the chrono crate magic
            */
-          let logTime: DateTime<Local> = DateTime::from_timestamp_millis(timestamp)
-                                          .ok_or(Error::Time.trace("Failed to convert timestamp from service log"))
-                                          .context(&self.name)?
+          let ts_local: DateTime<Local> = DateTime::from_timestamp_millis(timestamp)
+                                          .ok_or(Error::Time.trace("invalid timestamp while appending log entry"))
+                                          .subject(&self.name)?
                                           .into();
           // Format time as <Day Month Year, Hours:Minutes:Seconds> to not anger the Americans
-          format!("[{}] {marker}{contents}\n", logTime.format("%d %b %Y, %H:%M:%S"))
+          format!("[{}] {marker}{contents}\n", ts_local.format("%d %b %Y, %H:%M:%S"))
         }
       };
 
       /*
-       * When we output to stdout and another program is piped (e.g. grep),
-       * the program cuts off the pipe after it has consumed everything it
-       * needs so we end up with SIGPIPE. We don't error here if found, since
-       * this is expected & not an actual error, though is treated as one
-       * by println!() so we have to do a janky workaround for compatibility
+       * When we output to stdout and another program is piped (e.g. grep), the program cuts off the pipe
+       * after it has consumed everything it needs so we end up with SIGPIPE. We don't error here if found,
+       * since this is expected & not an actual error, though is treated as one by `println!` so we have to
+       * do a janky workaround for compatibility
        *
-       * (note): This may change in the future though, see
-       * <https://github.com/rust-lang/rust/issues/62569>
+       * (note): This may change in the future though, see <https://github.com/rust-lang/rust/issues/62569>
        */
       out.write_all(line.as_bytes())
-            .inspect_err(|err| if (err.kind() == BrokenPipe) { exit(0) })
+            .inspect_err(|e| if e.kind() == BrokenPipe { exit(0) } /* exit OK on pipe cut off */)
             .into_trace(Error::Format)?;
     }
     Ok(())

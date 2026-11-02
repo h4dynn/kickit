@@ -3,146 +3,39 @@
 #![allow(unused_parens)]
 #![allow(non_snake_case)]
 
-use std::{fs, fs::File, io::Write, path::PathBuf, process};
+use std::{fs, fs::File, io::Write, path::PathBuf};
 use tokio::task;
 use nix::unistd::getuid;
-use kickit::{oncelock,
-              console::Colour, console::{ErrorResult, ReturnError, HandleError},
-              init::{service::Service, target::TARGET, PID, console::{Error, Result, status, stall, QUIET}}};
+use kickit::{oncelock, init::{console::prelude::*, init_guard, service::RootService, target::TARGET}};
 
 /*
- * The way dhat does its profiling in heap mode, is that the profiler
- * will wait until the main() function has finished. However, in our case,
- * since we are an init system, main() blocks indefinitely. So we have to set
- * a specific amount of time to wait for the init to setup everything and then
- * manually drop the profiler.
+ * The way dhat does its profiling in heap mode, is that the profiler will wait until the main() function
+ * has finished. However, in our case, since we are an init system, main() blocks indefinitely. So we have
+ * to set a specific amount of time to wait for the init to setup everything and then manually drop the
+ * profiler.
  */
 #[cfg(feature = "dhat_heap")]
-const DHAT_HEAP_WAIT_TIME_MINS: u64 = 5;
-
-trait AssessError<OkType>
-{
-  // Do not error if optional is true
-  fn assess(self, optional: bool) -> Option<OkType>;
-}
-
-impl<OkType> AssessError<OkType> for Result<OkType>
-{
-  fn assess(self, optional: bool) -> Option<OkType>
-  {
-    if (optional)
-    {
-      // We do not want to return an error, so only warn
-      self.or_warn()
-    }
-    else {
-      Some(self.handle())
-    }
-  }
-}
-
-trait StartService
-{
-  async fn start(self) -> Result<Option<Service>>;
-}
-
-impl StartService for Service
-{
-  /**
-    * Lifetime of a service with Standard pattern
-    * ===========================================
-    *
-    * - All services defined in the target are initialized by `initServices(..)`,
-    *
-    * - Each service is started by this method,
-    *
-    * - Once started by `Service::up(..)`, the service is broken up into its logger &
-    *   supervisor,
-    *
-    * - The logger watches the service's stderr & stdout streams and reports them
-    *   (if `logger` is set to true),
-    *
-    * - The supervisor makes sure the service doesn't die, and if it does and is
-    *   not optional, throw a global error,
-    *
-    * - What is left of the service is moved into `SERVICES`, where it will be used
-    *   when shutting down to stop the service
-    */
-  #[inline]
-  async fn start(mut self) -> Result<Option<Service>>
-  {
-    use kickit::{init::service::Pattern::{Standard, RunOnce}, state};
-
-    status!("Starting service: {}", self.name);
-
-    // Don't continue starting services if we are stalled
-    if (!state!().is_ok())
-    {
-      stall!();
-    }
-
-    if let Err(trace) = self.up().await
-    {
-      // If this service is optional we only need to warn not abort
-      if (self.optional)
-      {
-        trace.warn();
-      }
-      else {
-        return Err(trace)
-      }
-    }
-
-    if (self.pattern != RunOnce)
-    {
-      // We move the log & the supervisor, they will not be needed in service after this
-      let mut log = self.logger()?;
-      let mut supervisor = self.supervisor()?;
-
-      // Watch the log for updates
-      task::spawn(async move { log.watch().assess(self.optional) });
-
-      // Don't supervise a forking service since its expected that it exits
-      if (self.pattern == Standard)
-      {
-        // Supervise the service's daemon to make sure it doesn't die
-        task::spawn(async move { supervisor.supervise().assess(self.optional) });
-        // Return what is left of the service (some of its contents have been moved, like logger & process)
-        return Ok(Some(self))
-      }
-    }
-    Ok(None)
-  }
-}
+const DHAT_HEAP_WAIT_SECONDS: u64 = 5 * 60;
 
 /**
   * # Errors
   *
-  * - if /run/kickit exists (kickit is already running),
-  * - if not ran as root user,
-  * - if not ran as the init process (pid 1)
+  * * /run/kickit exists (kickit is already running)
+  *
+  * * Not ran as root user
+  *
+  * * Not ran as the init process (pid 1) and `--no-init` wasn't provided
  **/
 #[inline]
-fn sanity() -> Result<()>
+fn sanity(permit_non_init: bool) -> Result<()>
 {
-  use kickit::{console::guard, init::console::warn};
-
   // If /run/kickit is already there then another kickit is running
   guard!(fs::metadata("/run/kickit").is_ok() => Error::AlreadyRunning.into());
 
   // Make sure we are running as the root user
   guard!(!getuid().is_root() => Error::NotRoot.into());
 
-  if let Some(pid) = PID.get() && (pid.is_none())
-  {
-    if (cfg!(feature = "bypass_init_check"))
-    {
-      warn!("Bypassing init checks!");
-    }
-    else {
-      guard!(process::id() != 1 => Error::NotInit.into());
-    }
-  }
+  guard!(!cfg!(feature = "bypass_init_check") && !permit_non_init && init_guard() => Error::NotInit.into());
 
   Ok(())
 }
@@ -200,67 +93,53 @@ fn setupRunFs(services: &[String], debugDump: bool) -> Result<()>
   // Make the private folder, well, private
   set_permissions("/run/kickit/private", Permissions::from_mode(0o600)).into_trace(Error::RunFsFail)?;
 
-  for upService in (services)
+  for service_name in (services)
   {
-    create_dir(path!("/run/kickit/service", upService)).into_trace(Error::RunFsFail)?;
+    create_dir(path!("/run/kickit/service", service_name)).into_trace(Error::RunFsFail)?;
   }
 
   Ok(())
 }
 
+/*
+ * Mount system pseudo filesystems (proc, sys & dev) as well as temporary filesystems. This method also
+ * additionally remounts the root filesystem as read-write
+ */
 #[inline]
-fn mountSysFilesystems() -> Result<()>
+fn mountSystemFilesystems() -> Result<()>
 {
-  use kickit::init::mount::{Flag::{NoSuid, NoDev, NoExec, Remount, Private}, mount, unmount, mounted, flags};
+  use kickit::init::mount::mount_table;
 
-  macro_rules! mount
+  let sys_fs_tab = mount_table!
+  [
+    ("proc",  "/proc", "proc",     [NoSuid, NoDev, NoExec], []),
+    ("sysfs", "/sys",  "sysfs",    [NoSuid, NoDev, NoExec], []),
+    ("dev",   "/dev",  "devtmpfs", [NoSuid],                []),
+    ("tmpfs", "/run",  "tmpfs",    [NoSuid],                []),
+    // `NoExec` is ideal here, however, some programs will save install scripts to /tmp and such
+    ("tmpfs", "/tmp",  "tmpfs",    [NoSuid, NoDev],         []),
+    // Remount the rootfs as read-write in case of `ro` kernel cmdline param
+    (_,       "/",     _,          [Private, Remount],      [])
+  ];
+
+  for entry in (sys_fs_tab)
   {
-    ($from: tt, $to: tt, $fsType: tt, $flags: expr) =>
-    {
-      // Check if each destination is already mounted, and if so unmount it
-      if !(mounted($to)? && unmount($to, None).is_err())
-      {
-        mount(Some($from), $to, Some($fsType), $flags, None)?
-      }
-    }
+    entry.mount()?;
   }
 
-  mount!("proc", "/proc", "proc", flags![NoSuid, NoDev, NoExec]);
-  mount!("sysfs", "/sys", "sysfs", flags![NoSuid, NoDev, NoExec]);
-  mount!("dev", "/dev", "devtmpfs", flags![NoSuid]);
-  mount!("tmpfs", "/run", "tmpfs", flags![NoSuid]);
-  mount!("tmpfs", "/tmp", "tmpfs", flags![NoSuid, NoDev]);
-  // Remount the rootfs as read-write if booted with `ro` cmdline argument
-  mount(None, "/", None, flags![Private, Remount], None)?;
-
-  // No errors yippie
   Ok(())
-}
-
-// Ran before starting to catch any potential early errors in a service config
-#[inline]
-fn initServices(services: &Vec<String>) -> Result<Vec<Service>>
-{
-  let mut initServices: Vec<Service> = Vec::new();
-
-  for service in (services)
-  {
-    initServices.push(Service::init(service)?);
-  }
-
-  Ok(initServices)
 }
 
 // Use the dhat allocator for heap analysis, slower than regular allocator
-#[cfg(feature = "dhat_heap")]
 #[global_allocator]
+#[cfg(feature = "dhat_heap")]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 #[tokio::main]
-async fn main()
+async fn main() -> !
 {
-  use std::{thread::park, process::id as pid, env::args};
-  use kickit::{init::{target, cmdline, socket::Open, service::STANDARD_SERVICES, mount::mountFstabEntries}, socket};
+  use std::{thread::park, env::args};
+  use kickit::{init::{target, cmdline_flag, socket::Open, service::STANDARD_SERVICES, mount::fstab}, socket};
 
   macro_rules! open_socks
   {
@@ -276,20 +155,18 @@ async fn main()
   let profiler = dhat::Profiler::new_heap();
 
   let sysArgs: Vec<String> = args().collect();
-  // This will only be Some if we are not running as the init process
-  let pid = (sysArgs.len() > 1 && &sysArgs[1] == "--no-init").then_some(pid());
+  // This argument tells us to act like we're not the init process, only use kickit for service management
+  let noInitArg = sysArgs.len() > 1 && &sysArgs[1] == "--no-init";
 
-  oncelock! { PID = pid }.handle();
-
-  sanity().handle();
+  sanity(noInitArg).handle();
   status!("kickit {}", kickit::VERSION);
 
   // Respect the quiet argument if provided
-  oncelock! { QUIET = cmdline("quiet") == Ok(None) && pid.is_none() }.handle();
+  oncelock! { QUIET = cmdline_flag("quiet") && !init_guard() }.handle();
 
   // Assume the test target on debug builds
   #[cfg(debug_assertions)]
-  let target = "test";
+  let target = sysArgs.last().unwrap();
 
   // Check if cmdline parameter 'init.target=XXX' has been provided, if not use the default "system" target
   #[cfg(not(debug_assertions))]
@@ -300,8 +177,8 @@ async fn main()
   status!("Target: {target}");
 
   /*
-   * By having our target in a OnceLock we ensure that others parts of the init
-   * can access it hassle-free for e.g. logging or services
+   * By having our target in a OnceLock we ensure that others parts of the init can access it hassle-free
+   * for e.g. logging or services
    */
   oncelock! { TARGET = target::source(target.to_owned()).handle() }.handle();
 
@@ -309,56 +186,58 @@ async fn main()
   let target = TARGET.get().ok_or(Error::Unknown.trace("target is inaccessible")).handle();
 
   status!("Initialising services");
-  let services = initServices(&target.services).handle();
+  // Parse service's configuration - done before execution to weed out any config errors first
+  let services: Vec<_> = target.services.iter().map(|s| RootService::try_source(s).handle()).collect();
 
   // If we are running alongside another init these things should've already been done
-  if (pid.is_none())
+  if (!init_guard())
   {
     status!("Mounting system filesystems");
-    mountSysFilesystems().handle();
+    mountSystemFilesystems().handle();
 
     status!("Setting hostname");
     let mut hostname = File::create("/proc/sys/kernel/hostname").into_trace(Error::ProcFs).handle();
     hostname.write_all(target.hostname.as_bytes()).into_trace(Error::ProcFs).handle();
 
     // Now we can mount all the custom entries in /etc/fstab
-    mountFstabEntries().handle();
-  }
-
-  status!("Setting up work directory");
-  setupRunFs(target.services.as_slice(), target.debugDump).handle();
-
-  // Open our sockets
-  open_socks!(socket::Core, socket::Log, socket::Power);
-
-  // We will set `SERVICES` to this after all services have been started
-  let mut standardServices = Vec::new();
-
-  for service in (services)
-  {
-    // Spawn the service's process, start its supervisor & log watcher
-    if let Some(handle) = service.start().await.handle()
+    for entry in (fstab().handle())
     {
-      standardServices.push(handle);
+      let (src, dest) = (entry.source().cloned().unwrap_or(PathBuf::from("none")), entry.dest());
+
+      status!("Mounting {} -> {}", src.display(), dest.display());
+      entry.mount().handle();
     }
   }
 
-  oncelock! { STANDARD_SERVICES = standardServices }.handle();
+  status!("Setting up work directory");
+  setupRunFs(target.services.as_slice(), target.debug_dump).handle();
+
+  // Open socket listeners, uses a macro for different types
+  open_socks!(socket::Core, socket::Log, socket::Power);
+
+  let mut out_services = Vec::new();
+
+  for service in (services)
+  {
+    status!("Starting service: {}", &service.cfg.name);
+    // Spawn the service's process, start its supervisor & log watcher
+    if let Some(service_handle) = service.up().await.handle()
+    {
+      out_services.push(service_handle);
+    }
+  }
+
+  oncelock! { STANDARD_SERVICES = out_services }.handle();
 
   // main() never exits so we never get a dhat analysis without explicitly dropping the profiler
   #[cfg(feature = "dhat_heap")]
   {
-    use std::{thread::sleep, time::Duration};
-
     // Give some time for everything to be setup
-    sleep(Duration::from_mins(DHAT_HEAP_WAIT_TIME_MINS));
-
+    std::thread::sleep(std::time::Duration::from_secs(DHAT_HEAP_WAIT_SECONDS));
     // Drop the profiler so we get the analysis
     drop(profiler);
   }
 
   // Block indefinitely
-  loop {
-    park();
-  }
+  loop { park(); }
 }

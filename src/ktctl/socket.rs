@@ -1,25 +1,26 @@
 //! I/O with init sockets
 
-use crate::{Data, socket::{Socket, PeerError}, console::{ExtendWithContext, ErrorResult}};
+use crate::{Data, socket::Socket, socket, console::{ExtendWithSubject, ErrorResult}};
 use super::console::{Error, ErrorTrace, StdResult, Result};
 
-impl From<PeerError> for ErrorTrace
+impl From<socket::Error> for ErrorTrace
 {
-  fn from(input: PeerError) -> Self
+  fn from(input: socket::Error) -> Self
   {
     Error::Socket.trace(input)
   }
 }
 
+// Interpret given response from the socket as Result enum
 trait SocketResult<OkType>
 {
-  fn result(&self) -> Result<StdResult<OkType, PeerError>>;
+  fn result(&self) -> Result<StdResult<OkType, socket::Error>>;
 }
 
 pub trait Request: Socket + Sized + Send + Sync
 {
   // Expect the socket to give us a response
-  fn request(self, input: u8) -> impl Future<Output = Result<StdResult<Data, PeerError>>> + Send
+  fn request(self, input: u8) -> impl Future<Output = Result<StdResult<Data, socket::Error>>> + Send
   {
     use tokio::{net::UnixStream, io::AsyncReadExt};
 
@@ -31,7 +32,7 @@ pub trait Request: Socket + Sized + Send + Sync
       let mut out = Data::new();
       // Open a new connection to the socket, may fail if there is an existing connection
       let mut io = UnixStream::connect(&path).await.into_trace(Error::SocketAccessFail)
-                                                      .context(path.display())?;
+                                                      .subject(path.display())?;
 
       // Wait until the stream is ready to accept being written to
       io.writable().await.into_trace(Error::SocketAccessFail)?;
@@ -39,7 +40,7 @@ pub trait Request: Socket + Sized + Send + Sync
 
       // ..and then wait for the stream to have a reply available
       io.readable().await.into_trace(Error::SocketAccessFail)?;
-      io.read_to_end(&mut out).await.into_trace(Error::SocketAccessFail).context("io.Core")?;
+      io.read_to_end(&mut out).await.into_trace(Error::SocketAccessFail).subject("io.Core")?;
 
       out.result()
     }
@@ -48,7 +49,7 @@ pub trait Request: Socket + Sized + Send + Sync
 
 impl<S: AsRef<[u8]>> SocketResult<Vec<u8>> for S
 {
-  fn result(&self) -> Result<StdResult<Vec<u8>, PeerError>>
+  fn result(&self) -> Result<StdResult<Vec<u8>, socket::Error>>
   {
     let inner = self.as_ref();
 
@@ -59,8 +60,10 @@ impl<S: AsRef<[u8]>> SocketResult<Vec<u8>> for S
 
     match (inner[0])
     {
-      PeerError::OK => Ok(Ok(inner[1..].to_vec())),
-      PeerError::ERR => Ok(Err(PeerError::errorize(inner[1]).into_trace(Error::SocketResponse)?)),
+      socket::Error::OK => Ok(Ok(inner[1..].to_vec())),
+      // Match the returned byte to its corresponding error variant
+      socket::Error::ERR => Ok(Err(socket::Error::errorize(inner[1]).into_trace(Error::SocketResponse)?)),
+      // This shouldn't ever happen unless there is a bug in the init itself
       bad => Err(Error::SocketResponse.trace(format!("Expected ok/err, got {bad}")))
     }
   }

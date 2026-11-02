@@ -1,130 +1,192 @@
 //! Error handling, warning & status implementations for the init process
 
-use std::{sync::Mutex, fmt::Display};
-use crate::{oncelock, console::{Colour, Colourize, ReturnError, ErrorResult, ExtendWithContext, error}, state::InitState};
+use std::{sync::Mutex, fmt::{Display, Debug}};
+use crate::{console::error_ty, state::InitState};
 
-#[derive(derive_more::Display)]
-pub enum Marker
+pub mod prelude
 {
-  #[display("\x1b[1m[*]\x1b[0m")]
-  Status,
-  #[display("\x1b[1;33m[-]\x1b[0m")]
-  Warn,
-  #[display("\x1b[1;31m[!]\x1b[0m")]
-  Fatal,
-  #[display("\x1b[1;92m[>]\x1b[0m")]
-  Service
+  // Universal console implementations shared between all programs
+  pub use crate::console::prelude::*;
+
+  pub use super::{QUIET, MASTER_LOG, Error, ErrorTrace, Result, status, warn, debug_cc};
 }
+use crate::console::prelude::*;
 
 oncelock! {
-  // If set to true, master log entries won't be shown on console
-  pub static QUIET: bool;
+  /// Hide master log entries from console TTY
+  pub static QUIET: OnceLock<bool>;
 }
 
 /*
- * This is where our logs from things like `state!()`, `warn!()`
- * and errors will be stored to (mostly for debugging). Do not
- * modify this manually, use the `log!()` macro instead
+ * This is where our logs from things like `state!()`, `warn!()` and errors will be stored to (mostly for
+ * debugging). Do not modify this manually, use the `log!()` macro instead
  */
 #[doc(hidden)]
 pub static MASTER_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-error! {
-  /*
-   * Error stores all possible errors that could be thrown
-   * Messages and whether the error should send you to an emergency shell
-   * or not are defined in the impl
-   */
+error_ty! {
+  ///
+  /// All recorded possible init level errors. The goal is to be as descriptive & helpful as possible, while
+  /// not overwhelming the user with unnecessary information.
+  ///
   #[derive(PartialEq, Eq, Clone, Copy, Debug, thiserror::Error, Default)]
   #[must_use]
   pub enum Error
   {
-    // A generic error- usually for very specific case errors & impossible situations
+    /// A generic error- thrown as sparingly as possible for exceptionally rare circumstances
     #[default]
-    #[error("An unknown error occurred")] Unknown,
-    // Errors when starting up the init system
-    #[error("kickit is already running!")] AlreadyRunning,
-    #[error("kickit must be ran as the init process")] NotInit,
-    #[error("Insufficient permissions: kickit can only be ran as root")] NotRoot,
-    // File-related errors i.e. can't access or permission denied
-    #[error("File or directory not found")] FileNotFound,
-    #[error("Failed to setup work directory")] RunFsFail,
-    #[error("Kernel command-line parameter not found")] Cmdline,
-    #[error("Invalid command-line parameter")] BadCmdline,
-    #[error("Failed to get the current system time")] Time,
-    // When data can't be represented as a UTF-8 string
-    #[error("Failed to format content in UTF-8")] Format,
-    // Target-related errors (see how they are used in `src/target.rs`)
-    #[error("Target not found, has it been created in the library folder?")] TargetNotFound,
-    #[error("A required value is missing in target configuration")] TargetMissingValue,
-    #[error("Failed to parse target configuration file")] TargetParse,
-    // Socket data input/output failure
-    #[error("Failed to start up a socket")] SocketStartup,
-    #[error("Socket read connection failure")] SocketIoRead,
-    #[error("Socket write connection failure")] SocketIoWrite,
-    #[error("Input/output connections failed on socket")] SocketIo,
-    // Service-related errors (used in `src/service.rs`)
-    #[error("Failed to parse service configuration file")] ServiceParse,
-    #[error("Failed to access a service's files")] ServiceAccess,
-    #[error("Failed to start a service")] ServiceUp,
-    #[error("Failed to stop a service")] ServiceDown,
-    #[error("Failed to start logger for a service")] ServiceLog,
-    #[error("Failed to read from the service's logger")] ServiceLogContent,
-    #[error("Failed to compress/decompress the service's logger")] ServiceLogCompress,
-    #[error("Service was killed or stopped")] ServiceNotRunning,
-    #[error("Service became a zombie")] ServiceZombified,
-    #[error("Invalid sandboxing option specified")] ServiceSandboxBadOpt,
-    #[error("Failed to initialise sandbox directory")] ServiceSandboxInit,
-    #[error("Failed to access a logfile")] AccessLog,
-    // Mount-related failures
-    #[error("Invalid formatted line in fstab")] FstabParse,
-    #[error("Failed to mount a critical filesystem")] SysFsMount,
-    #[error("Failed to unmount a filesystem")] SysFsUnmount,
-    // Pure init errors
-    #[error("Failed to shutdown the init system")] Shutdown,
-    #[error("Failed to read from the proc filesystem")] ProcFs,
-    #[error("A critical error occurred while trying to power down the system")] PowerCritical
+    #[error("An unknown error occurred")]
+    Unknown,
+
+    /*
+     * Errors during init startup
+     * ==========================
+     */
+    #[error("kickit is already running!")]
+    AlreadyRunning,
+    #[error("Unsupported execution environment: must be ran as the init process")]
+    NotInit,
+    #[error("Insufficient permissions: must be ran as the root user")]
+    NotRoot,
+
+    /*
+     * File access or modification errors
+     * ==================================
+     */
+    #[error("File or directory not found")]
+    FileNotFound,
+    #[error("Failed to setup work directory")]
+    RunFsFail,
+    #[error("Kernel command-line parameter not found")]
+    Cmdline,
+    #[error("Invalid command-line parameter")]
+    BadCmdline,
+    #[error("Failed to get the current system time")]
+    Time,
+
+    /// Attempts to parse invalid data as UTF-8
+    #[error("Failed to format content in UTF-8")]
+    Format,
+
+    /*
+     * Target sourcing errors
+     * ======================
+     */
+    #[error("Target not found, has it been created in the library folder?")]
+    TargetNotFound,
+    #[error("A required value is missing in target configuration")]
+    TargetMissingValue,
+    #[error("Failed to parse target configuration file")]
+    TargetParse,
+
+    /*
+     * Socket input/output errors
+     * ==========================
+     */
+    #[error("Failed to start up a socket")]
+    SocketStartup,
+    #[error("Socket read connection failure")]
+    SocketIoRead,
+    #[error("Socket write connection failure")]
+    SocketIoWrite,
+    #[error("Input/output connections failed on socket")]
+    SocketIo,
+
+    /*
+     * Service misconfigurations or unexpected circumstances
+     * =====================================================
+     */
+    #[error("Error occured while parsing service configuration file")]
+    ServiceParse,
+    #[error("A required file for this service could not be accessed")]
+    ServiceAccess,
+    #[error("Operation not supported for service's with this execution pattern")]
+    ServicePatternMismatch,
+    #[error("Service startup failure")]
+    ServiceUp,
+    #[error("Service stop failure")]
+    ServiceDown,
+    #[error("An error occurred in the service's logger")]
+    ServiceLog,
+    #[error("Service log read failure")]
+    ServiceLogContent,
+    #[error("Service log compression failure")]
+    ServiceLogCompress,
+    #[error("Service died during supervision, expected daemon execution")]
+    ServiceDied,
+    #[error("Service unexpectedly became a zombie during supervision, expected daemon execution")]
+    ServiceZombified,
+    #[error("Invalid service sandboxing option provided")]
+    ServiceSandboxBadOpt,
+    #[error("Error occurred while initializing service's sandbox environment")]
+    ServiceSandboxInit,
+    #[error("Service log file is inaccessible")]
+    AccessLog,
+
+    /*
+     * Mount failures
+     * ==============
+     */
+    #[error("Invalid formatting of mount entry")]
+    MountParse,
+    #[error("Error occurred while attempting to mount a critical virtual filesystem")]
+    SysFsMount,
+    #[error("Error occurred while unmounting a filesystem")]
+    Unmount,
+
+    /*
+     * Miscellanous
+     * ============
+     */
+    #[error("Failed to shutdown the init system")]
+    Shutdown,
+    #[error("Failed to read from the proc filesystem")]
+    ProcFs,
+    #[error("A critical error occurred while trying to power down the system")]
+    PowerCritical
   }
 }
 
-macro_rules! innerFatal
+macro_rules! inner_fatal
 {
   // Implementation for a tracless error, just displays the provided message
-  (@traceless $error: tt) =>
+  (@traceless $kind: tt) =>
   {
-    use $crate::init::console::Marker::Fatal;
-
-    log!(format!("{Fatal} {}", $error.colour(Colour::Red)));
-    $error.exit();
+    log!(format!("{} {}", LogEntryType::FATAL_ERROR, $kind.bold()));
+    $kind.exit();
   };
   (@trace $error: tt) =>
   {
-    use $crate::init::console::Marker::Fatal;
+    let Self { kind, trace, subject } = $error;
 
-    // Move out from struct
-    let ErrorTrace { kind, ref trace, context } = $error;
+    log!({
+      let trailing_trace_colon = (!trace.is_empty()).then_some(':').unwrap_or_default();
+      if let Some(subject) = &subject
+      {
+        format!("{} {}: {}{}", LogEntryType::FATAL_ERROR, subject, kind.bold(), trailing_trace_colon)
+      }
+      else {
+        format!("{} {}{}", LogEntryType::FATAL_ERROR, kind.bold(), trailing_trace_colon)
+      }
+    });
 
-    log!(format!("{Fatal} {}{}", kind.colour(Colour::Red), context.as_ref().map(|c| format!(": {c}")).unwrap_or_default()));
-
-    if (!$error.trace.is_empty())
+    if (!trace.is_empty())
     {
-      log!(format!("{Fatal} >> {}", trace.trim_end_matches('\n')));
+      for line in trace.lines()
+      {
+        log!(format!("{} (info): {}", LogEntryType::FATAL_ERROR, line));
+      }
     }
 
     kind.exit();
   };
 }
 
-/*
- * .fatal() implementations
- * Error will throw just the message with no trace
- * ErrorTrace will provide a trace
- */
 impl ReturnError for Error
 {
   fn fatal(self) -> !
   {
-    innerFatal!(@traceless self);
+    inner_fatal!(@traceless self);
   }
   fn warn(self)
   {
@@ -136,7 +198,7 @@ impl ReturnError for ErrorTrace
 {
   fn fatal(self) -> !
   {
-    innerFatal!(@trace self);
+    inner_fatal!(@trace self);
   }
 
   fn warn(self)
@@ -177,6 +239,7 @@ fn kickToEmergencyShell() -> !
   use std::{process::Command, os::unix::process::CommandExt, thread::park};
   use crate::{init::{EMERGENCY_SHELL, EMERGENCY_SHELL_UID}, state::INIT_STATE};
 
+  // "nobody" group
   const NOBODY_GID: u32 = 65534;
 
   // Try to lock the mutex & see if we are in emergency already
@@ -203,13 +266,28 @@ fn kickToEmergencyShell() -> !
   }
 
   // Don't exit here otherwise we will get a kernel panic
-  loop {
-    park();
-  }
+  loop { park(); }
 }
 
+pub mod LogEntryType
+{
+  pub const STATUS: &str = concat!("\x1b[1m", "[*]", "\x1b[0m");
+  pub const WARNING: &str = concat!("\x1b[1;33m", "[-]", "\x1b[0m");
+  pub const FATAL_ERROR: &str = concat!("\x1b[1;31m", "[!]", "\x1b[0m");
+  pub const SERVICE_RELAY: &str = concat!("\x1b[1;32m", "[>]", "\x1b[0m");
+
+  #[cfg(debug_assertions)]
+  pub const DEBUG: &str = concat!("\x1b[1;35m", "[?]", "\x1b[0m");
+}
+
+/**
+  * Append a raw entry to the init's master log
+  *
+  * This macro shouldn't be called directly, instead use the macro corresponding
+  * to the type of entry you want to append (e.g.: [`status!`], [`warn!`])
+  */
 #[macro_export]
-macro_rules! log
+macro_rules! init_log
 {
   ($new: expr) =>
   {
@@ -229,57 +307,82 @@ macro_rules! log
     }
   };
 }
-pub use crate::log as log;
+pub use crate::init_log as log;
 
+/**
+  * Print a standard message to the init's master log
+  *
+  * # Example
+  *
+  * ```
+  * init_status!("kickit {}", kickit::VERSION);
+  * ```
+  *
+  * Output:
+  *
+  * ```txt
+  * [*] kickit 26.07.1
+  * ```
+  */
 #[macro_export]
-macro_rules! stall
-{
-  () => {
-    use std::{thread::sleep, time::Duration};
-    use $crate::{state::INIT_STATE, state::InitState::Stalled};
-
-    let mut state = INIT_STATE.lock().unwrap();
-
-    // Signal to all components of init that we are stalled
-    *state = Stalled;
-
-    drop(state);
-
-    // Sleep for 584,500,000,000 years aka a long time
-    sleep(Duration::new(u64::MAX, 0));
-  };
-}
-pub use crate::stall as stall;
-
-/*
- * Print a message to the init's master log, e.g.:
- *
- * `status!("Hello world!");`
- *
- * Output: `[*] Hello world`
- */
-#[macro_export]
-macro_rules! status
+macro_rules! init_status
 {
   ($($message: tt)*) =>
   {
     {
-      use $crate::init::console::{log, Marker::Status};
-      log!(format!("{} {}", Status, format!($($message)*)))
+      use $crate::init::console::{log, LogEntryType::STATUS};
+      log!(format!("{} {}", STATUS, format!($($message)*)))
     }
   };
 }
-pub use crate::status as status;
+pub use crate::init_status as status;
 
+/// Append a warning to init's master log
 #[macro_export]
-macro_rules! warn
+macro_rules! init_warn
 {
   ($($message: tt)*) =>
   {
     {
-      use $crate::init::console::{log, Marker::Warn};
-      log!(format!("{} {}{}{}", Warn, Colour::Bold, format!($($message)*), Colour::Reset))
+      use $crate::init::console::{log, LogEntryType::WARNING};
+      log!(format!("{} {}{}{}", WARNING, Colour::Bold, format!($($message)*), Colour::Reset))
     }
   };
 }
-pub use crate::warn as warn;
+pub use crate::init_warn as warn;
+
+/**
+  * A conditional-compilation macro that prints debugging information to stderr, if
+  * compiled with debug profile and the `debug_einfo` feature.
+  *
+  * This macro acts almost identical to [`std::dbg`] except for its conditionality.
+  *
+  * NOTE: This doesn't add to the master log as it would use too much memory doing so.
+  * You can only read from the init's stderr for these entries
+  */
+#[macro_export]
+macro_rules! debug_cc
+{
+  ($($item: expr),*) =>
+  {
+    // These attributes are checked at compile-time
+    #[cfg(debug_assertions)]
+    #[cfg(feature = "debug_einfo")]
+    {
+      $(
+        $crate::init::console::dbg_eprintln(stringify!($item), $item);
+      )*
+    }
+  };
+}
+pub use crate::debug_cc as debug_cc;
+
+/// Use a function as implementation so we can track the caller of the function
+#[cfg(debug_assertions)]
+#[track_caller]
+pub fn dbg_eprintln(name: impl Display, item: impl Debug)
+{
+  use std::panic::Location;
+
+  eprintln!("{} ({}) {name} = {item:?}", LogEntryType::DEBUG, Location::caller());
+}
