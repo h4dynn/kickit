@@ -139,7 +139,8 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 async fn main() -> !
 {
   use std::{thread::park, env::args};
-  use kickit::{init::{target, cmdline_flag, socket::Open, service::STANDARD_SERVICES, mount::fstab}, socket};
+  use kickit::{init::{target, cmdline_flag, cmdline_value, socket::Open, service::STANDARD_SERVICES,
+                mount::fstab}, socket};
 
   macro_rules! open_socks
   {
@@ -170,7 +171,7 @@ async fn main() -> !
 
   // Check if cmdline parameter 'init.target=XXX' has been provided, if not use the default "system" target
   #[cfg(not(debug_assertions))]
-  let target = cmdline("init.target").unwrap_or(Some(String::from("system")))
+  let target = cmdline_value("init.target").unwrap_or(Some(String::from("system")))
                     .ok_or(Error::BadCmdline.trace("init.target requires a target name to be provided!"))
                     .handle();
 
