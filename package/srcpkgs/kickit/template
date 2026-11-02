@@ -1,6 +1,6 @@
 pkgname=kickit
-version=0.1.2
-revision=1
+version=26.10.1
+revision=7
 makedepends="rustup git"
 short_desc="A robust & simple init system"
 maintainer="h4dynn <h4dynn@github.com>"
@@ -32,8 +32,8 @@ do_install()
   install -vm0755 ./target/x86_64-unknown-linux-musl/release/kickit "$DESTDIR/usr/lib/kickit/kickit"
   install -vm0755 ./target/x86_64-unknown-linux-musl/release/ktctl "$DESTDIR/usr/bin/ktctl"
   install -vm0755 ./src/init/emergency_shell.sh "$DESTDIR/usr/lib/kickit/emergency_shell"
-  install -vm0755 ./src/init/service-helpers/agetty.sh "$DESTDIR/usr/lib/kickit/agetty.sh"
-  install -vm0755 ./src/init/service-helpers/udev.sh "$DESTDIR/usr/lib/kickit/udev.sh"
+  install -vm0755 ./src/init/service/helpers/agetty.sh "$DESTDIR/usr/lib/kickit/agetty.sh"
+  install -vm0755 ./src/init/service/helpers/udev.sh "$DESTDIR/usr/lib/kickit/udev.sh"
 
   while read service
   do {
